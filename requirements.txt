@@ -1,0 +1,15 @@
+numpy
+matplotlib
+scipy
+sympy
+scikit_learn
+pandas
+pymoo
+opt-einsum
+cma
+coco-visualize
+coco-experiment
+cocopp
+cobyqa
+hnswlib
+numba
