@@ -38,14 +38,14 @@ class CmaWarmStartManager:
         self.velocity_contribution_corner, self.shrinkage_factor_corner = self.get_factors(warm_start_parameters.corner_covariance.velocity_contribution.d2_value, warm_start_parameters.corner_covariance.velocity_contribution.d40_value, warm_start_parameters.corner_covariance.shrinkage.d2_value, warm_start_parameters.corner_covariance.shrinkage.d40_value)
         self.corner_path = self.parameter_scaling(warm_start_parameters.corner_covariance.path_trust.d2_value, warm_start_parameters.corner_covariance.path_trust.d40_value)
         
-        self.velocity_contribution_gap, self.shrinkage_factor_gap = self.get_factors(warm_start_parameters.exploitation_covariance.velocity_contribution.d2_value, warm_start_parameters.exploitation_covariance.velocity_contribution.d40_value, warm_start_parameters.exploitation_covariance.shrinkage.d2_value, warm_start_parameters.exploitation_covariance.shrinkage.d40_value)
-        self.gap_path = self.parameter_scaling(warm_start_parameters.exploitation_covariance.path_trust.d2_value, warm_start_parameters.exploitation_covariance.path_trust.d40_value)
+        self.velocity_contribution_gap, self.shrinkage_factor_gap = self.get_factors(warm_start_parameters.gap_covariance.velocity_contribution.d2_value, warm_start_parameters.gap_covariance.velocity_contribution.d40_value, warm_start_parameters.gap_covariance.shrinkage.d2_value, warm_start_parameters.gap_covariance.shrinkage.d40_value)
+        self.gap_path = self.parameter_scaling(warm_start_parameters.gap_covariance.path_trust.d2_value, warm_start_parameters.gap_covariance.path_trust.d40_value)
     
-        self.velocity_contribution_uhvi, self.shrinkage_factor_uhvi = self.get_factors(warm_start_parameters.local_exploration_covariance.velocity_contribution.d2_value, warm_start_parameters.local_exploration_covariance.velocity_contribution.d40_value, warm_start_parameters.local_exploration_covariance.shrinkage.d2_value, warm_start_parameters.local_exploration_covariance.shrinkage.d40_value)
-        self.uhvi_path = self.parameter_scaling(warm_start_parameters.local_exploration_covariance.path_trust.d2_value, warm_start_parameters.local_exploration_covariance.path_trust.d40_value)
+        self.velocity_contribution_uhvi, self.shrinkage_factor_uhvi = self.get_factors(warm_start_parameters.uhvi_covariance.velocity_contribution.d2_value, warm_start_parameters.uhvi_covariance.velocity_contribution.d40_value, warm_start_parameters.uhvi_covariance.shrinkage.d2_value, warm_start_parameters.uhvi_covariance.shrinkage.d40_value)
+        self.uhvi_path = self.parameter_scaling(warm_start_parameters.uhvi_covariance.path_trust.d2_value, warm_start_parameters.uhvi_covariance.path_trust.d40_value)
         
-        self.velocity_contribution_wsum, self.shrinkage_factor_wsum = self.get_factors(warm_start_parameters.global_exploration_covariance.velocity_contribution.d2_value, warm_start_parameters.global_exploration_covariance.velocity_contribution.d40_value, warm_start_parameters.global_exploration_covariance.shrinkage.d2_value, warm_start_parameters.global_exploration_covariance.shrinkage.d40_value)
-        self.wsum_path = self.parameter_scaling(warm_start_parameters.global_exploration_covariance.path_trust.d2_value, warm_start_parameters.global_exploration_covariance.path_trust.d40_value)
+        self.velocity_contribution_wsum, self.shrinkage_factor_wsum = self.get_factors(warm_start_parameters.wsum_covariance.velocity_contribution.d2_value, warm_start_parameters.wsum_covariance.velocity_contribution.d40_value, warm_start_parameters.wsum_covariance.shrinkage.d2_value, warm_start_parameters.wsum_covariance.shrinkage.d40_value)
+        self.wsum_path = self.parameter_scaling(warm_start_parameters.wsum_covariance.path_trust.d2_value, warm_start_parameters.wsum_covariance.path_trust.d40_value)
 
         
         self.initial_sigma_move = warm_start_parameters.initial_sigma_move
@@ -59,10 +59,10 @@ class CmaWarmStartManager:
         self.n_warm_start: int = int(3 * x_count)
         
         # Radius values (Scaled by dimensionality for most)
-        self.r_feasibility: float = warm_start_parameters.r_local_perx * np.sqrt(self.x_count)
-        self.r_local_exploration: float = warm_start_parameters.r_uhvi_perx * np.sqrt(self.x_count)
-        self.r_global_exploration: float = warm_start_parameters.r_exploration_perx * np.sqrt(self.x_count)
+        self.r_feasibility: float = warm_start_parameters.r_feasibility_perx * np.sqrt(self.x_count)
+        self.r_uhvi: float = warm_start_parameters.r_uhvi_perx * np.sqrt(self.x_count)
         self.r_corner: float = warm_start_parameters.r_corner_perx * np.sqrt(self.x_count)
+        self.r_exploration: float = warm_start_parameters.r_exploration_perx * np.sqrt(self.x_count)
         
         # Maximum number of points to extract from the archive before density reduction
         self.min_points = int(round(self.n_warm_start * 2.5))
@@ -238,6 +238,9 @@ class CmaWarmStartManager:
 
         return x_shifted_clipped, sigma_final, C_final, v_norm
     
+    
+    
+    
 
     def _get_points_in_hypersphere(self, archive: InternalArchive, c: np.ndarray, r: float, min_points: int) -> Tuple[np.ndarray, float]:
         """
@@ -400,7 +403,7 @@ class CmaWarmStartManager:
         
         # UHVI defaults: Random start inside the ROI. 
         c = np.random.rand(self.x_count)
-        r: float = self.r_local_exploration
+        r: float = self.r_uhvi
         d: float = 0.0
         velocity_contribution: float = self.velocity_contribution_uhvi
         shrinkage_factor: float = self.shrinkage_factor_uhvi
@@ -430,7 +433,7 @@ class CmaWarmStartManager:
         elif (mode == ScalarizationMode.EXP):
             velocity_contribution = self.velocity_contribution_wsum
             shrinkage_factor = self.shrinkage_factor_wsum
-            r = self.r_global_exploration
+            r = self.r_exploration
             c = points_of_interest[0]
             path_trust = self.wsum_path
 

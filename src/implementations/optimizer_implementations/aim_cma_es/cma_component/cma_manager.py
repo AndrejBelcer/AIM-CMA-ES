@@ -32,7 +32,7 @@ class CmaManager:
         self.max_iter: int = np.ceil(cma_parameters.max_iter_const + np.sqrt(x_count) * cma_parameters.max_iter_per_sqrt_dim)
         self.f_tolerance: float = cma_parameters.convergence_tolerance
         self.cma_type = cma_parameters.cma_type
-        self.global_exploration_sigma = cma_parameters.warm_start_parameters.global_exploration_sigma
+        self.exploration_sigma = cma_parameters.warm_start_parameters.exploration_sigma
         
         # O(1) Kernel Mapping
         self.kernel_map = {
@@ -90,7 +90,7 @@ class CmaManager:
             used_popsize = int(round(self.popsize * (1 + 0.5 * self.feasibility_runs)))  
         elif (self.active_scalarizer.mode == ScalarizationMode.EXP):
             used_popsize = 6 + 2 * self.x_count
-            sigma = self.global_exploration_sigma
+            sigma = self.exploration_sigma
 
         self.es_kernel = kernel_class(x0 = x_0, sigma = sigma, C = C, popsize = used_popsize, max_iter = self.max_iter, tolfun = self.f_tolerance, lower_bounds = self.cma_lb, upper_bounds = self.cma_ub, v_norm = v_norm, path_trust =  path_trust)
         
