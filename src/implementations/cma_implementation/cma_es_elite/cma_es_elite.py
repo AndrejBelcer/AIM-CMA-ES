@@ -108,7 +108,7 @@ class CMAES_Elite_Kernel(CMAES_Base):
             self.stop_string = "Kernel converged."
             return True
         
-        # 3. Premature Concergence Check
+        # 3. Premature Convergence Check
         if current_best > 0:
             if (current_best < self.target):
                 self.target = max(0, current_best * 0.99 - 0.001)

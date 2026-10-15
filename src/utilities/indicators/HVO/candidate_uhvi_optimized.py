@@ -318,12 +318,12 @@ class Candidate_UHVI_Optimized(OptimizedHVBase):
             scores[mask] = self._penalty_impl(points[mask])
         return scores
 
-    def calculate_archive_scores(self, archive_points, containts_infeasible=False):
+    def calculate_archive_scores(self, archive_points, contains_infeasible=False):
         """Warm-start distance only; undominated infeasible points get zero.
 
         False promises dominance/equality, allowing the dominance check to be
         skipped. The parameter spelling follows the project's updated API.
         """
         points = _points_array(archive_points, self.dim, name='archive_points')
-        implementation = self._archive_checked_impl if containts_infeasible else self._archive_impl
+        implementation = self._archive_checked_impl if contains_infeasible else self._archive_impl
         return implementation(points)

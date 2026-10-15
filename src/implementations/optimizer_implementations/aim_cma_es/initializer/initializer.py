@@ -6,14 +6,14 @@ from scipy.optimize import linear_sum_assignment
 from scipy.stats.qmc import LatinHypercube
 from itertools import combinations
 
-from src.implementations.optimizer_implementations.aim_cma_es.enums import InitilizerPhase
+from src.implementations.optimizer_implementations.aim_cma_es.enums import InitializerPhase
 from src.implementations.optimizer_implementations.aim_cma_es.component_parameters import InitializationParameters
 from src.implementations.optimizer_implementations.aim_cma_es.archive.internal_archive import InternalArchive
 from src.implementations.optimizer_implementations.aim_cma_es.state_tracker import StateTracker
 
 class Initializer(ABC):
     """
-    Shotgun Initialization Procedure:
+    Diverse Initialization Procedure:
     1. Generates an initial LHS batch to explore the landscape.
     2. Generates N random weight vectors.
     3. Uses the Hungarian algorithm to optimally pair each LHS point to a weight vector.
@@ -31,18 +31,18 @@ class Initializer(ABC):
         self.f_count = f_count
         self.g_count = g_count
         
-        self.use_L2 = initialization_parameters.use_L2
+        self.use_L2_weight_normalization = initialization_parameters.use_L2_weight_normalization
         self.seed = initialization_parameters.seed
 
         # Budgets
-        self.N_initial = math.ceil(initialization_parameters.initial_points_multiplier * math.sqrt(self.x_count) * math.sqrt(self.f_count))
-        self.N_final = math.ceil(initialization_parameters.final_lhs * math.sqrt(self.x_count))
-        self.max_optimizer_evals = math.ceil((2 * self.x_count + 1) + (initialization_parameters.allowed_evaluations_per_dim * self.x_count))
+        self.initial_lhs_size = math.ceil(initialization_parameters.initial_lhs_size_factor * math.sqrt(self.x_count) * math.sqrt(self.f_count))
+        self.final_lhs_size = math.ceil(initialization_parameters.final_lhs_size_factor * math.sqrt(self.x_count))
+        self.optimizer_evaluation_budget = math.ceil((2 * self.x_count + 1) + (initialization_parameters.additional_optimizer_evaluations_per_variable * self.x_count))
         
         # State Machine
         self.active_optimizer: Any = None
         self.finished: bool = False
-        self.phase: InitilizerPhase = InitilizerPhase.LHS_SEEDING
+        self.phase: InitializerPhase = InitializerPhase.LHS_SEEDING
         
         # Data Storage
         self.initial_lhs_X = np.empty((0, self.x_count))
@@ -56,7 +56,7 @@ class Initializer(ABC):
         self.active_weight: Optional[np.ndarray] = None
         self.active_f_L: Optional[np.ndarray] = None
         self.active_f_D: Optional[np.ndarray] = None
-        self.optimizer_evals_current_run = 0
+        self.optimizer_evaluations_used = 0
 
     @property
     def is_optimizer_active(self) -> bool:
@@ -67,14 +67,14 @@ class Initializer(ABC):
         return len(self.remaining_lhs_indices) > 0
 
     def transition_to_final_lhs(self):
-        self.phase = InitilizerPhase.LHS_FINAL
+        self.phase = InitializerPhase.LHS_FINAL
 
     def _generate_lhs(self, n_points: int) -> np.ndarray:
         sampler = LatinHypercube(d=self.x_count, scramble=True, seed=self.seed)
         self.seed += 1
         return sampler.random(n=n_points)
 
-    def generate_weights(self, n_weights_requested: int, n_obj: int, use_L2: bool = False, add_noise: bool = True, seed: int = 42) -> np.ndarray:
+    def generate_weights(self, n_weights_requested: int, n_obj: int, use_L2_weight_normalization: bool = False, add_noise: bool = True, seed: int = 42) -> np.ndarray:
         """
         Generates a uniformly distributed set of weight vectors using the Das-Dennis approach.
         (Simplex Lattice) method, adjusted for an exact requested budget.
@@ -119,7 +119,7 @@ class Initializer(ABC):
             weights += noise
 
         # 5. Normalize the weights
-        if use_L2:
+        if use_L2_weight_normalization:
             # Normalize to L2 sphere (sum of squares = 1)
             norms = np.linalg.norm(weights, axis=1, keepdims=True)
         else:
@@ -136,7 +136,7 @@ class Initializer(ABC):
         self.seed += 1
         rng = np.random.default_rng(self.seed)
         
-        weights = self.generate_weights(n_weights_requested=self.N_initial, n_obj=self.f_count, use_L2=self.use_L2, add_noise=True, seed=self.seed)
+        weights = self.generate_weights(n_weights_requested=self.initial_lhs_size, n_obj=self.f_count, use_L2_weight_normalization=self.use_L2_weight_normalization, add_noise=True, seed=self.seed)
 
         rng.shuffle(weights)
         self.remaining_weights = list(weights)
@@ -145,10 +145,10 @@ class Initializer(ABC):
         if self.finished:
             return np.empty((0, self.x_count))
             
-        if self.phase == InitilizerPhase.LHS_SEEDING:
-            return self._generate_lhs(self.N_initial)    
+        if self.phase == InitializerPhase.LHS_SEEDING:
+            return self._generate_lhs(self.initial_lhs_size)    
         
-        elif self.phase == InitilizerPhase.OPTIMIZER:
+        elif self.phase == InitializerPhase.OPTIMIZER:
             if self.is_optimizer_active:
                 x_ask = self._ask_optimizer()
                 if len(x_ask) == 0:
@@ -156,9 +156,9 @@ class Initializer(ABC):
                 return x_ask
             return np.empty((0, self.x_count))
             
-        elif self.phase == InitilizerPhase.LHS_FINAL:
+        elif self.phase == InitializerPhase.LHS_FINAL:
             self.finished = True
-            return self._generate_lhs(self.N_final)
+            return self._generate_lhs(self.final_lhs_size)
 
         return np.empty((0, self.x_count))
 
@@ -201,30 +201,30 @@ class Initializer(ABC):
         self.active_weight = chosen_weight
         self.active_f_L = f_L
         self.active_f_D = f_D
-        self.optimizer_evals_current_run = 0
+        self.optimizer_evaluations_used = 0
 
     def tell(self, x_norm: np.ndarray, f: np.ndarray, g: np.ndarray):
         if len(x_norm) == 0:
             return
         
-        if self.phase == InitilizerPhase.LHS_SEEDING:
+        if self.phase == InitializerPhase.LHS_SEEDING:
             self.initial_lhs_X = x_norm.copy()
             self.initial_lhs_F = f.copy()
             self.initial_lhs_G = g.copy()
             
             self._generate_and_shuffle_weight_pool()
-            self.remaining_lhs_indices = list(range(self.N_initial))
-            self.phase = InitilizerPhase.OPTIMIZER
+            self.remaining_lhs_indices = list(range(self.initial_lhs_size))
+            self.phase = InitializerPhase.OPTIMIZER
             
-        elif self.phase == InitilizerPhase.OPTIMIZER and self.is_optimizer_active:
+        elif self.phase == InitializerPhase.OPTIMIZER and self.is_optimizer_active:
             # Compute scalarized objective for the local optimizer
             f_norm = (f - self.active_f_L) / self.active_f_D
             s = np.sum(self.active_weight * f_norm, axis=1)
             
             self._tell_optimizer(x_norm, s, g)
-            self.optimizer_evals_current_run += len(x_norm)
+            self.optimizer_evaluations_used += len(x_norm)
             
-            if not self._is_optimizer_running() or self.optimizer_evals_current_run >= self.max_optimizer_evals:
+            if not self._is_optimizer_running() or self.optimizer_evaluations_used >= self.optimizer_evaluation_budget:
                 self.active_optimizer = None
 
     # ==========================================================================

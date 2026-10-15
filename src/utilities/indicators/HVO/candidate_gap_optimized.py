@@ -64,7 +64,7 @@ class Candidate_GapHV_Optimized(OptimizedHVBase):
     def _calculate_candidates_2d(self, points):
         return _gap_scores_2d(points, self._xs, self._ys, self._neg_ys, self._edges, self._prefix, self.ref_point, self.gap_point, self.gap_offset)
 
-    def calculate_archive_scores(self, archive_points, containts_infeasible=False):
+    def calculate_archive_scores(self, archive_points, contains_infeasible=False):
         """Return unshifted L2 to the target; feasibility does not alter gap ranking."""
         points = _points_array(archive_points, self.dim, name='archive_points')
         return _gap_distances(points, self.gap_point, 0.0)

@@ -26,7 +26,7 @@ class CMA_Type(Enum):
     CMA_SYM = "cma_sym"
 
 # ==========================================
-# Refiner ENUMS
+# Refinement ENUMS
 # ==========================================
 
 class LocalityStrategy(Enum):
@@ -64,13 +64,13 @@ class CVType(Enum):
 
 class ScalarizationMode(Enum):
     FEASIBILITY = "Feasibility"
-    CORNER = "Corner"
-    GAP = "Gap"
-    UHVI = "UHVI"
-    EXP = "EXP"
+    CORNER_SEARCH = "Corner Search"
+    EXPLOITATION = "Exploitation"
+    LOCAL_EXPLORATION = "Local Exploration"
+    GLOBAL_EXPLORATION = "Global Exploration"
 
 
-class InitilizerPhase(Enum):
+class InitializerPhase(Enum):
     LHS_SEEDING = "LHS_Seeding"
     OPTIMIZER = "OPTIMIZER"
     LHS_FINAL = "LHS_Final"
@@ -78,7 +78,7 @@ class InitilizerPhase(Enum):
 class SolverPhase(Enum):
     INITIALIZATION = "Initialization"
     CMA = "CMA"
-    REFINER = "Refiner"
+    REFINEMENT = "Refinement"
     NONE = "None"
     TEST = "Test"
 

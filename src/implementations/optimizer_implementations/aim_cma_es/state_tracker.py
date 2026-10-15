@@ -55,7 +55,7 @@ class StateTracker:
         self.frozen_best_corners = np.full(f_count, np.inf)
         
         # Structured 2D array for vectorized spatial pruning for target gap
-        self.tabu_array: np.ndarray = np.empty((0, f_count))
+        self.exploitation_tabu_targets_F_raw: np.ndarray = np.empty((0, f_count))
 
     def update_live_state(self, new_indices: np.ndarray, new_f: np.ndarray, new_g: np.ndarray, archive: InternalArchive):
         """Updates global extremes and the Empirical Front immediately (Synchronous)."""
@@ -214,15 +214,15 @@ class StateTracker:
             self.frozen_front_F = np.empty((0, self.f_count))
 
 
-    def add_tabu_point(self, f: np.ndarray) -> None:
-        self.tabu_array = np.vstack([self.tabu_array, f])
+    def add_exploitation_tabu_target(self, f: np.ndarray) -> None:
+        self.exploitation_tabu_targets_F_raw = np.vstack([self.exploitation_tabu_targets_F_raw, f])
 
 
-    def empty_tabu_array(self) -> None:
-        self.tabu_array = np.empty((0, self.f_count))
+    def clear_exploitation_tabu_targets(self) -> None:
+        self.exploitation_tabu_targets_F_raw = np.empty((0, self.f_count))
 
 
-    def GetGapTarget(self, tabu_tolerance: float) -> Tuple[Optional[np.ndarray], List[np.ndarray], bool]:
+    def GetExploitationGapTarget(self, tabu_tolerance: float) -> Tuple[Optional[np.ndarray], List[np.ndarray], bool]:
         """
         Calculates the largest gap in the Frozen Front.
         - For 2D: Uses an efficient O(N log N) sorting-based approach.
@@ -280,9 +280,9 @@ class StateTracker:
         if num_edges == 0:
             return None, [], False
             
-        has_tabu = len(self.tabu_array) > 0
+        has_tabu = len(self.exploitation_tabu_targets_F_raw) > 0
         if has_tabu:
-            tabu_norm_array = (self.tabu_array - self.f_L) / self.f_D
+            tabu_norm_array = (self.exploitation_tabu_targets_F_raw - self.f_L) / self.f_D
         
         # We process edges in batches to avoid wasting computation if an early edge is valid,
         # while still benefiting from blazing fast C-level vectorized operations.
@@ -340,7 +340,7 @@ class StateTracker:
 
 
 
-    def CheckCornerImprovement(self, f_significant_change: float) -> List[int]:
+    def CheckCornerImprovement(self, corner_improvement_tolerance: float) -> List[int]:
         """
         Compares the live corners against the frozen corners.
         Returns a list of objective indices that improved significantly.
@@ -352,12 +352,12 @@ class StateTracker:
         for i in range(self.f_count):
             imp = norm_improvement[i]
             
-            if imp >= f_significant_change:
+            if imp >= corner_improvement_tolerance:
                 improved_indices.append(i)
                 
         return improved_indices
 
-    def DebugCornerImprovement(self, f_significant_change: float, active_target_axis: Optional[int] = None) -> List[str]:
+    def DebugCornerImprovement(self, corner_improvement_tolerance: float, active_target_axis: Optional[int] = None) -> List[str]:
         raw_improvement = self.frozen_best_corners - self.live_best_corners
         norm_improvement = raw_improvement / self.f_D
 
@@ -368,7 +368,7 @@ class StateTracker:
 
             if(active_target_axis is not None):
                 if(i == active_target_axis):
-                    if imp >= f_significant_change:
+                    if imp >= corner_improvement_tolerance:
                         results.append(f"[Target Corner {i}] Improved significantly by {imp:.2e}.")
                     elif imp > 0:
                         results.append(f"[Target Corner {i}] Improved by {imp:.2e}.")

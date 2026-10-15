@@ -10,12 +10,12 @@ class InitializerCOBYQA_O(Initializer):
         super().__init__(x_count, f_count, g_count, initialization_parameters)
         
         # Extract COBYQA specific parameters
-        self.rhobeg = initialization_parameters.rhobeg
-        self.rhoend = initialization_parameters.rhoend
+        self.initial_trust_region_radius = initialization_parameters.initial_trust_region_radius
+        self.final_trust_region_radius = initialization_parameters.final_trust_region_radius
 
     def _create_optimizer(self, x0: np.ndarray) -> COBYQA:
         # Bounds are strictly [0, 1]^D in the normalized space
-        return COBYQA(x0=x0, lower_bounds=np.zeros(self.x_count), upper_bounds=np.ones(self.x_count), rhobeg=self.rhobeg, rhoend=self.rhoend)
+        return COBYQA(x0=x0, lower_bounds=np.zeros(self.x_count), upper_bounds=np.ones(self.x_count), rhobeg=self.initial_trust_region_radius, rhoend=self.final_trust_region_radius)
 
     def _is_optimizer_running(self) -> bool:
         if self.active_optimizer is None:

@@ -35,7 +35,7 @@ class CandidateIndicator(ABC):
         """
         Returns the scores for each candidate from the archive.
         All should be expected to be dominated, so some checks can be quickened compared to calculate_candidate_score.
-        This is meant for the warm start speed up (finding the best poinst in the archive).
+        This supports warm starts by finding the best points in the archive.
         """
         Exception("Must be implemented by derived class")
 
@@ -49,7 +49,7 @@ class CandidateIndicator(ABC):
 
     def initialize_frozen_front(self, frozen_front: np.ndarray) -> np.ndarray:
         """
-        Can be overriedn by derived class.
+        Can be overridden by a derived class.
         For example if points need to be first sorted, or anything else.
         """
         return frozen_front

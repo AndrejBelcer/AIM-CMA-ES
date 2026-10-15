@@ -15,11 +15,11 @@ class CmaWarmStartManager:
     
     Logic:
     - Grid Reduction: Filters density to avoid bias using a pre-computed distance matrix.
-    - Selection: Picks 'n_warm_start' points based on strategy (Full vs Partial).
+    - Selection: Picks 'target_warm_start_points' points based on strategy (Full vs Partial).
     - Ranking: Sorts points (Feasible > Infeasible) and identifies ties.
-    - Mixture Covariance: Computes both a weighted positional covariance and a velocity vector (gradient of improvement).
-      Normalizes both to have Trace=N, mixes them and applies shrinkage.
-    - Initialization: Shifts the starting mean along the velocity vector and extracts the initial step-size (sigma) from the weighted positional variance.
+    - Mixture Covariance: Computes both a weighted positional covariance and an inferred improvement direction.
+      Normalizes both to have Trace=N, mixes them and applies isotropic_weight.
+    - Initialization: Shifts the starting mean along the inferred improvement direction and extracts the initial step-size (sigma) from the weighted positional variance.
     """
     def __init__(self, x_count: int, true_lower_bounds_normalized: np.ndarray, true_upper_bounds_normalized: np.ndarray, warm_start_parameters: WarmStartParameters):
         self.x_count = x_count
@@ -29,47 +29,47 @@ class CmaWarmStartManager:
         self.true_upper_bounds_normalized = true_upper_bounds_normalized
         
         # Extract parameters
-        self.sigma_factor = warm_start_parameters.sigma_factor
+        self.warm_start_sigma_factor = warm_start_parameters.warm_start_sigma_factor
         
         
-        self.velocity_contribution_feasibility, self.shrinkage_factor_feasibility = self.get_factors(warm_start_parameters.feasability_covariance.velocity_contribution.d2_value, warm_start_parameters.feasability_covariance.velocity_contribution.d40_value, warm_start_parameters.feasability_covariance.shrinkage.d2_value, warm_start_parameters.feasability_covariance.shrinkage.d40_value)
-        self.feasibility_path = self.parameter_scaling(warm_start_parameters.feasability_covariance.path_trust.d2_value, warm_start_parameters.feasability_covariance.path_trust.d40_value)
+        self.feasibility_direction_weight, self.feasibility_isotropic_weight = self.get_factors(warm_start_parameters.feasibility_covariance.direction_weight.value_at_dimension_2, warm_start_parameters.feasibility_covariance.direction_weight.value_at_dimension_40, warm_start_parameters.feasibility_covariance.isotropic_weight.value_at_dimension_2, warm_start_parameters.feasibility_covariance.isotropic_weight.value_at_dimension_40)
+        self.feasibility_path_trust = self.parameter_scaling(warm_start_parameters.feasibility_covariance.path_trust.value_at_dimension_2, warm_start_parameters.feasibility_covariance.path_trust.value_at_dimension_40)
         
-        self.velocity_contribution_corner, self.shrinkage_factor_corner = self.get_factors(warm_start_parameters.corner_covariance.velocity_contribution.d2_value, warm_start_parameters.corner_covariance.velocity_contribution.d40_value, warm_start_parameters.corner_covariance.shrinkage.d2_value, warm_start_parameters.corner_covariance.shrinkage.d40_value)
-        self.corner_path = self.parameter_scaling(warm_start_parameters.corner_covariance.path_trust.d2_value, warm_start_parameters.corner_covariance.path_trust.d40_value)
+        self.corner_search_direction_weight, self.corner_search_isotropic_weight = self.get_factors(warm_start_parameters.corner_search_covariance.direction_weight.value_at_dimension_2, warm_start_parameters.corner_search_covariance.direction_weight.value_at_dimension_40, warm_start_parameters.corner_search_covariance.isotropic_weight.value_at_dimension_2, warm_start_parameters.corner_search_covariance.isotropic_weight.value_at_dimension_40)
+        self.corner_search_path_trust = self.parameter_scaling(warm_start_parameters.corner_search_covariance.path_trust.value_at_dimension_2, warm_start_parameters.corner_search_covariance.path_trust.value_at_dimension_40)
         
-        self.velocity_contribution_gap, self.shrinkage_factor_gap = self.get_factors(warm_start_parameters.gap_covariance.velocity_contribution.d2_value, warm_start_parameters.gap_covariance.velocity_contribution.d40_value, warm_start_parameters.gap_covariance.shrinkage.d2_value, warm_start_parameters.gap_covariance.shrinkage.d40_value)
-        self.gap_path = self.parameter_scaling(warm_start_parameters.gap_covariance.path_trust.d2_value, warm_start_parameters.gap_covariance.path_trust.d40_value)
+        self.exploitation_direction_weight, self.exploitation_isotropic_weight = self.get_factors(warm_start_parameters.exploitation_covariance.direction_weight.value_at_dimension_2, warm_start_parameters.exploitation_covariance.direction_weight.value_at_dimension_40, warm_start_parameters.exploitation_covariance.isotropic_weight.value_at_dimension_2, warm_start_parameters.exploitation_covariance.isotropic_weight.value_at_dimension_40)
+        self.exploitation_path_trust = self.parameter_scaling(warm_start_parameters.exploitation_covariance.path_trust.value_at_dimension_2, warm_start_parameters.exploitation_covariance.path_trust.value_at_dimension_40)
     
-        self.velocity_contribution_uhvi, self.shrinkage_factor_uhvi = self.get_factors(warm_start_parameters.uhvi_covariance.velocity_contribution.d2_value, warm_start_parameters.uhvi_covariance.velocity_contribution.d40_value, warm_start_parameters.uhvi_covariance.shrinkage.d2_value, warm_start_parameters.uhvi_covariance.shrinkage.d40_value)
-        self.uhvi_path = self.parameter_scaling(warm_start_parameters.uhvi_covariance.path_trust.d2_value, warm_start_parameters.uhvi_covariance.path_trust.d40_value)
+        self.local_exploration_direction_weight, self.local_exploration_isotropic_weight = self.get_factors(warm_start_parameters.local_exploration_covariance.direction_weight.value_at_dimension_2, warm_start_parameters.local_exploration_covariance.direction_weight.value_at_dimension_40, warm_start_parameters.local_exploration_covariance.isotropic_weight.value_at_dimension_2, warm_start_parameters.local_exploration_covariance.isotropic_weight.value_at_dimension_40)
+        self.local_exploration_path_trust = self.parameter_scaling(warm_start_parameters.local_exploration_covariance.path_trust.value_at_dimension_2, warm_start_parameters.local_exploration_covariance.path_trust.value_at_dimension_40)
         
-        self.velocity_contribution_wsum, self.shrinkage_factor_wsum = self.get_factors(warm_start_parameters.wsum_covariance.velocity_contribution.d2_value, warm_start_parameters.wsum_covariance.velocity_contribution.d40_value, warm_start_parameters.wsum_covariance.shrinkage.d2_value, warm_start_parameters.wsum_covariance.shrinkage.d40_value)
-        self.wsum_path = self.parameter_scaling(warm_start_parameters.wsum_covariance.path_trust.d2_value, warm_start_parameters.wsum_covariance.path_trust.d40_value)
+        self.global_exploration_direction_weight, self.global_exploration_isotropic_weight = self.get_factors(warm_start_parameters.global_exploration_covariance.direction_weight.value_at_dimension_2, warm_start_parameters.global_exploration_covariance.direction_weight.value_at_dimension_40, warm_start_parameters.global_exploration_covariance.isotropic_weight.value_at_dimension_2, warm_start_parameters.global_exploration_covariance.isotropic_weight.value_at_dimension_40)
+        self.global_exploration_path_trust = self.parameter_scaling(warm_start_parameters.global_exploration_covariance.path_trust.value_at_dimension_2, warm_start_parameters.global_exploration_covariance.path_trust.value_at_dimension_40)
 
         
-        self.initial_sigma_move = warm_start_parameters.initial_sigma_move
-        self.min_sigma = warm_start_parameters.min_sigma
-        self.max_sigma = warm_start_parameters.max_sigma
-        self.sigma_fallback = warm_start_parameters.sigma_fallback
-        self.tie_tolerance = warm_start_parameters.tie_tolerance
+        self.initial_mean_shift_factor = warm_start_parameters.initial_mean_shift_factor
+        self.min_warm_start_sigma = warm_start_parameters.min_warm_start_sigma
+        self.max_warm_start_sigma = warm_start_parameters.max_warm_start_sigma
+        self.fallback_warm_start_sigma = warm_start_parameters.fallback_warm_start_sigma
+        self.rank_tie_tolerance_fraction = warm_start_parameters.rank_tie_tolerance_fraction
         
         # Heuristic for covariance estimation samples
         # Covariance parameters: D*(D+1)/2.
-        self.n_warm_start: int = int(3 * x_count)
+        self.target_warm_start_points: int = int(3 * x_count)
         
         # Radius values (Scaled by dimensionality for most)
-        self.r_feasibility: float = warm_start_parameters.r_feasibility_perx * np.sqrt(self.x_count)
-        self.r_uhvi: float = warm_start_parameters.r_uhvi_perx * np.sqrt(self.x_count)
-        self.r_corner: float = warm_start_parameters.r_corner_perx * np.sqrt(self.x_count)
-        self.r_exploration: float = warm_start_parameters.r_exploration_perx * np.sqrt(self.x_count)
+        self.feasibility_radius: float = warm_start_parameters.feasibility_radius_factor * np.sqrt(self.x_count)
+        self.local_exploration_radius: float = warm_start_parameters.local_exploration_radius_factor * np.sqrt(self.x_count)
+        self.corner_search_radius: float = warm_start_parameters.corner_search_radius_factor * np.sqrt(self.x_count)
+        self.global_exploration_radius: float = warm_start_parameters.global_exploration_radius_factor * np.sqrt(self.x_count)
         
         # Maximum number of points to extract from the archive before density reduction
-        self.min_points = int(round(self.n_warm_start * 2.5))
-        self.max_points_in_hypersphere = warm_start_parameters.max_points_in_hypersphere
+        self.min_neighborhood_points = int(round(self.target_warm_start_points * 2.5))
+        self.max_neighborhood_points = warm_start_parameters.max_neighborhood_points
 
 
-    def parameter_scaling(self, value_d2: float, value_d40: float) -> float:
+    def parameter_scaling(self, value_at_dimension_2: float, value_at_dimension_40: float) -> float:
         """
         Scales the parameters based on the d2 and d40 value points.
         Minimum and maximum are 0.0 and 1.0.
@@ -77,14 +77,14 @@ class CmaWarmStartManager:
         t: float = (self.x_count - 2) / (40 - 2)
         sq_t: float = np.sqrt(t)
         
-        value: float = value_d2 + (value_d40 - value_d2) * sq_t
+        value: float = value_at_dimension_2 + (value_at_dimension_40 - value_at_dimension_2) * sq_t
         return np.clip(value, 0.0, 1.0)
 
 
-    def get_factors(self, velocity_d2: float, velocity_d40: float, shrinkage_d2: float, shrinkage_d40: float) -> Tuple[float, float]:
-        shrinkage = self.parameter_scaling(shrinkage_d2, shrinkage_d40)
-        velocity = np.clip(self.parameter_scaling(velocity_d2, velocity_d40), 0.0, 1.0 - shrinkage)
-        return velocity, shrinkage
+    def get_factors(self, direction_weight_at_dimension_2: float, direction_weight_at_dimension_40: float, isotropic_weight_at_dimension_2: float, isotropic_weight_at_dimension_40: float) -> Tuple[float, float]:
+        isotropic_weight = self.parameter_scaling(isotropic_weight_at_dimension_2, isotropic_weight_at_dimension_40)
+        direction_weight = np.clip(self.parameter_scaling(direction_weight_at_dimension_2, direction_weight_at_dimension_40), 0.0, 1.0 - isotropic_weight)
+        return direction_weight, isotropic_weight
         
    
     def _get_ranks(self, scores: np.ndarray, offset: int) -> np.ndarray:
@@ -96,7 +96,7 @@ class CmaWarmStartManager:
         # NEW: Make tie tolerance relative to the score spread
         score_spread = np.max(scores) - np.min(scores)
         # If spread is 0, everything is a tie anyway. Otherwise, use a percentage (e.g., 0.1% of spread)
-        dynamic_tie_tolerance = self.tie_tolerance * score_spread
+        dynamic_tie_tolerance = self.rank_tie_tolerance_fraction * score_spread
 
         group_start_score = scores[0]
         group_rank = offset + 1
@@ -129,7 +129,7 @@ class CmaWarmStartManager:
         return weights
     
     
-    def compute_initial_shift(self, c: np.ndarray, v_norm: np.ndarray, C: np.ndarray, sigma: float, beta: float) -> np.ndarray:
+    def compute_initial_shift(self, c: np.ndarray, unit_improvement_direction: np.ndarray, C: np.ndarray, sigma: float, mean_shift_factor: float) -> np.ndarray:
         """
         Computes the shifted starting mean x_0 such that the Mahalanobis distance 
         from x_0 back to c is exactly 'beta' standard deviations.
@@ -143,45 +143,45 @@ class CmaWarmStartManager:
         D_inv = np.diag(1.0 / np.sqrt(eigenvalues))
         C_inv_half = eigenvectors @ D_inv @ eigenvectors.T
         
-        # 2. Project velocity into isotropic space
-        z = C_inv_half @ v_norm
+        # 2. Project the inferred improvement direction into isotropic space
+        z = C_inv_half @ unit_improvement_direction
         z_norm = np.linalg.norm(z)
         
         # 3. Compute shift magnitude (alpha)
         if z_norm < 1e-12:
-            alpha = 0.0  # Fallback if velocity is effectively zero
+            alpha = 0.0  # Fallback if the improvement direction is effectively zero
         else:
-            alpha = beta * (sigma / z_norm)
+            alpha = mean_shift_factor * (sigma / z_norm)
             
         # 4. Shift the mean
-        x_0 = c + alpha * v_norm
+        x_0 = c + alpha * unit_improvement_direction
         
         return x_0
     
     
 
-    def _compute_warm_start(self, x_0: np.ndarray, X_pool_norm: np.ndarray, ranking_list: np.ndarray, velocity_contribution: float, shrinkage_factor: float) -> Tuple[np.ndarray, float, np.ndarray, np.ndarray]:
+    def _compute_warm_start(self, x_0: np.ndarray, X_pool_norm: np.ndarray, ranking_list: np.ndarray, direction_weight: float, isotropic_weight: float) -> Tuple[np.ndarray, float, np.ndarray, np.ndarray]:
         """
-        Computes the gradient-aligned covariance matrix, step size, and shifted mean.
-        Uses a trace-normalized mixture of positional covariance and velocity covariance.
-        Returns [x0, sigma, C, v_norm] for the start of the search.
+        Computes the direction-aligned covariance matrix, step size, and shifted mean.
+        Uses a trace-normalized mixture of positional covariance and directional covariance.
+        Returns [x0, sigma, C, unit_improvement_direction] for the start of the search.
         """
         n, d = X_pool_norm.shape
-        used_sigma_factor = self.sigma_factor
+        used_sigma_factor = self.warm_start_sigma_factor
 
         # Fallback for tiny pools
         if n < 2:
             fallback_x0 = X_pool_norm[0] if n == 1 else np.full(d, 0.5)
             fallback_x0 = np.clip(fallback_x0, self.true_lower_bounds_normalized, self.true_upper_bounds_normalized)
-            return fallback_x0, self.sigma_fallback, np.eye(d), np.zeros(d)
+            return fallback_x0, self.fallback_warm_start_sigma, np.eye(d), np.zeros(d)
             
-        elif n < self.n_warm_start:
-            used_sigma_factor *= np.sqrt(self.n_warm_start / n)
+        elif n < self.target_warm_start_points:
+            used_sigma_factor *= np.sqrt(self.target_warm_start_points / n)
 
         # 1. Weights (accounting for ties)
         weights = self._compute_weights(n, ranking_list)
 
-        # 2. Extract Velocity (Gradient of Improvement)
+        # 2. Infer the improvement direction from rank-weighted means
         m_unweighted = np.mean(X_pool_norm, axis=0)
         m_weighted = np.average(X_pool_norm, axis=0, weights=weights)
         
@@ -189,15 +189,15 @@ class CmaWarmStartManager:
         v_len = np.linalg.norm(v)
 
         local_scale = np.max(np.std(X_pool_norm, axis=0))
-        v_norm_successful: bool = False
+        has_reliable_improvement_direction: bool = False
         
-        # 3. Construct Velocity Covariance
+        # 3. Construct directional covariance
         if v_len > (1e-6 * local_scale) and v_len > 1e-15:
-            v_norm = v / v_len
-            C_V = np.outer(v_norm, v_norm)
-            v_norm_successful = True
+            unit_improvement_direction = v / v_len
+            C_V = np.outer(unit_improvement_direction, unit_improvement_direction)
+            has_reliable_improvement_direction = True
         else:
-            v_norm = np.zeros(d)
+            unit_improvement_direction = np.zeros(d)
             C_V = np.eye(d) / d  # Trace = 1 fallback
 
         # 4. Compute Weighted Positional Covariance
@@ -216,7 +216,7 @@ class CmaWarmStartManager:
         C_V_norm = C_V * (d / tr_V) if tr_V > 1e-12 else np.eye(d)
 
         # 6. Mixture and Shrinkage
-        C_final = (1.0 - velocity_contribution - shrinkage_factor) * C_W_norm + velocity_contribution * C_V_norm + shrinkage_factor * np.eye(d)
+        C_final = (1.0 - direction_weight - isotropic_weight) * C_W_norm + direction_weight * C_V_norm + isotropic_weight * np.eye(d)
 
         # 7. Sigma Estimation
         if tr_W < 1e-16:
@@ -225,43 +225,43 @@ class CmaWarmStartManager:
             sigma_w = np.sqrt(tr_W / d)
 
         # Scale and clip the final sigma for CMA-ES
-        sigma_final = np.clip(sigma_w * used_sigma_factor, self.min_sigma, self.max_sigma)
+        sigma_final = np.clip(sigma_w * used_sigma_factor, self.min_warm_start_sigma, self.max_warm_start_sigma)
 
         # 8. Shift Mean using the Mahalanobis reachability logic
-        if (v_norm_successful):
-            x_shifted = self.compute_initial_shift(c=x_0, v_norm=v_norm, C=C_final, sigma=sigma_final, beta=self.initial_sigma_move)
+        if (has_reliable_improvement_direction):
+            x_shifted = self.compute_initial_shift(c=x_0, unit_improvement_direction=unit_improvement_direction, C=C_final, sigma=sigma_final, mean_shift_factor=self.initial_mean_shift_factor)
         else:
             x_shifted = x_0
 
         # Clip against the true bounds
         x_shifted_clipped = np.clip(x_shifted, self.true_lower_bounds_normalized, self.true_upper_bounds_normalized)
 
-        return x_shifted_clipped, sigma_final, C_final, v_norm
+        return x_shifted_clipped, sigma_final, C_final, unit_improvement_direction
     
     
     
     
 
-    def _get_points_in_hypersphere(self, archive: InternalArchive, c: np.ndarray, r: float, min_points: int) -> Tuple[np.ndarray, float]:
+    def _get_points_in_hypersphere(self, archive: InternalArchive, c: np.ndarray, r: float, min_neighborhood_points: int) -> Tuple[np.ndarray, float]:
         """
         Finds indices of points within radius r of center c using the KDTree.
         If fewer than min_points are found, queries the exact min_points nearest neighbors.
-        If more than max_points_in_hypersphere are found, returns a random subsample.
+        If more than max_neighborhood_points are found, returns a random subsample.
         Returns the points and the radius used.
         """
         # 1. O(log N) Spatial Query
         indices_in_radius = archive.query_ball_point(c, r)
         n_in_radius = indices_in_radius.size
         
-        if n_in_radius >= min_points:
+        if n_in_radius >= min_neighborhood_points:
             # Safety Cap: Prevent massive RAM allocation in later steps
-            if n_in_radius > self.max_points_in_hypersphere:
-                return np.random.choice(indices_in_radius, size=self.max_points_in_hypersphere, replace=False), r
+            if n_in_radius > self.max_neighborhood_points:
+                return np.random.choice(indices_in_radius, size=self.max_neighborhood_points, replace=False), r
             return indices_in_radius, r
         
         # 2. Fallback: O(log N) Spatial Query for the exact 'min_points' nearest neighbors
         # Reduce the number of queried points, so that we don't expand the space too much
-        _, closest_indices = archive.query_k_nearest(c, min_points // 2, distance_upper_bound=np.sqrt(self.x_count))
+        _, closest_indices = archive.query_k_nearest(c, min_neighborhood_points // 2, distance_upper_bound=np.sqrt(self.x_count))
         closest_indices = closest_indices.ravel()
         # Remove invalid (-1) indices
         closest_indices_filtered = closest_indices[closest_indices != -1]
@@ -344,7 +344,7 @@ class CmaWarmStartManager:
         n_feas_selected = 0  # Counter for how many feasible points actually get selected
         
         for i in range(len(sorted_indices)):
-            if len(selected_indices) >= self.n_warm_start:
+            if len(selected_indices) >= self.target_warm_start_points:
                 break
                 
             if not valid_mask[i]:
@@ -397,57 +397,57 @@ class CmaWarmStartManager:
     def GetWarmStartValues(self, archive: InternalArchive, f_U: np.ndarray, scalarizer: Scalarizer, points_of_interest: List[np.ndarray]) -> Tuple[np.ndarray, float, np.ndarray, np.ndarray, float]:
         """
         Main entry point for CMA-ES Warm Start.
-        Returns [m, sigma, C, v_norm, path_trust]
+        Returns [m, sigma, C, unit_improvement_direction, path_trust]
         """
         mode = scalarizer.mode
         
-        # UHVI defaults: Random start inside the ROI. 
-        c = np.random.rand(self.x_count)
-        r: float = self.r_uhvi
-        d: float = 0.0
-        velocity_contribution: float = self.velocity_contribution_uhvi
-        shrinkage_factor: float = self.shrinkage_factor_uhvi
-        path_trust: float = self.uhvi_path
+        # Local Exploration (UHVI) defaults: random start inside the ROI. 
+        anchor_X_normalized = np.random.rand(self.x_count)
+        neighborhood_radius: float = self.local_exploration_radius
+        thinning_distance: float = 0.0
+        direction_weight: float = self.local_exploration_direction_weight
+        isotropic_weight: float = self.local_exploration_isotropic_weight
+        path_trust: float = self.local_exploration_path_trust
         
 
         if (mode == ScalarizationMode.FEASIBILITY):
-            r = self.r_feasibility
-            velocity_contribution = self.velocity_contribution_feasibility
-            shrinkage_factor = self.shrinkage_factor_feasibility
-            path_trust = self.feasibility_path
-        elif (mode == ScalarizationMode.CORNER):
-            c = points_of_interest[0]
-            r = self.r_corner
-            velocity_contribution = self.velocity_contribution_corner
-            shrinkage_factor = self.shrinkage_factor_corner
-            path_trust = self.corner_path
-        elif (mode == ScalarizationMode.GAP):
+            neighborhood_radius = self.feasibility_radius
+            direction_weight = self.feasibility_direction_weight
+            isotropic_weight = self.feasibility_isotropic_weight
+            path_trust = self.feasibility_path_trust
+        elif (mode == ScalarizationMode.CORNER_SEARCH):
+            anchor_X_normalized = points_of_interest[0]
+            neighborhood_radius = self.corner_search_radius
+            direction_weight = self.corner_search_direction_weight
+            isotropic_weight = self.corner_search_isotropic_weight
+            path_trust = self.corner_search_path_trust
+        elif (mode == ScalarizationMode.EXPLOITATION):
             p1, p2 = points_of_interest[0], points_of_interest[1]
-            c = (p1 + p2) / 2.0
-            L: float = np.linalg.norm(p1 - p2)
-            r = 1.5 * L
-            d = 0.334 * L 
-            velocity_contribution = self.velocity_contribution_gap
-            shrinkage_factor = self.shrinkage_factor_gap
-            path_trust = self.gap_path
-        elif (mode == ScalarizationMode.EXP):
-            velocity_contribution = self.velocity_contribution_wsum
-            shrinkage_factor = self.shrinkage_factor_wsum
-            r = self.r_exploration
-            c = points_of_interest[0]
-            path_trust = self.wsum_path
+            anchor_X_normalized = (p1 + p2) / 2.0
+            gap_endpoint_distance: float = np.linalg.norm(p1 - p2)
+            neighborhood_radius = 1.5 * gap_endpoint_distance
+            thinning_distance = 0.334 * gap_endpoint_distance 
+            direction_weight = self.exploitation_direction_weight
+            isotropic_weight = self.exploitation_isotropic_weight
+            path_trust = self.exploitation_path_trust
+        elif (mode == ScalarizationMode.GLOBAL_EXPLORATION):
+            direction_weight = self.global_exploration_direction_weight
+            isotropic_weight = self.global_exploration_isotropic_weight
+            neighborhood_radius = self.global_exploration_radius
+            anchor_X_normalized = points_of_interest[0]
+            path_trust = self.global_exploration_path_trust
 
                 
         # 2. Filter by Hypersphere using the Archive's KDTree
-        candidate_indices, effective_r = self._get_points_in_hypersphere(archive, c, r, min_points=self.min_points)
+        candidate_indices, effective_r = self._get_points_in_hypersphere(archive, anchor_X_normalized, neighborhood_radius, min_neighborhood_points=self.min_neighborhood_points)
         
         # 3. Compute Resolution Distance
         d_max = self._compute_appropriate_distance(len(candidate_indices), effective_r)
         
-        if d == 0.0:
-            d = d_max
+        if thinning_distance == 0.0:
+            thinning_distance = d_max
         else:
-            d = min(d, d_max)
+            thinning_distance = min(thinning_distance, d_max)
         
         # 4. Lazy Loading & O(1) Feasibility Check
         # Fetch ONLY the data for the candidate points, saving massive memory and compute overhead.
@@ -457,11 +457,11 @@ class CmaWarmStartManager:
         
         # 5. Density Reduction and Ranking
         X_norm = archive.get_norm_data()
-        final_indices, ranking_list = self._get_reduced_ranked_points(candidate_indices, X_norm, F_sub, G_sub, is_feas_mask, d, scalarizer)
+        final_indices, ranking_list = self._get_reduced_ranked_points(candidate_indices, X_norm, F_sub, G_sub, is_feas_mask, thinning_distance, scalarizer)
         
         # 6. Compute Final CMA Parameters
         X_pool = X_norm[final_indices]
         
         
-        m, sigma, C, v_norm = self._compute_warm_start(x_0 = c, X_pool_norm = X_pool, ranking_list = ranking_list, velocity_contribution = velocity_contribution, shrinkage_factor = shrinkage_factor)
-        return (m, sigma, C, v_norm, path_trust)
+        m, sigma, C, unit_improvement_direction = self._compute_warm_start(x_0 = anchor_X_normalized, X_pool_norm = X_pool, ranking_list = ranking_list, direction_weight = direction_weight, isotropic_weight = isotropic_weight)
+        return (m, sigma, C, unit_improvement_direction, path_trust)

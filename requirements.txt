@@ -5,6 +5,7 @@ sympy
 scikit_learn
 pandas
 pymoo
+moocore
 opt-einsum
 cma
 coco-visualize

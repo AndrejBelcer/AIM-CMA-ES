@@ -9,9 +9,9 @@ from scipy.optimize import minimize
 from moocore import is_nondominated
 
 from src.implementations.optimizer_implementations.aim_cma_es.archive.internal_archive import InternalArchive
-from src.implementations.optimizer_implementations.aim_cma_es.component_parameters import RefinerParameters
-from src.implementations.optimizer_implementations.aim_cma_es.refiner.local_bubble import LocalBubble
-from src.implementations.optimizer_implementations.aim_cma_es.refiner.manifold_model import ManifoldModel
+from src.implementations.optimizer_implementations.aim_cma_es.component_parameters import RefinementParameters
+from src.implementations.optimizer_implementations.aim_cma_es.refinement.local_region import LocalRegion
+from src.implementations.optimizer_implementations.aim_cma_es.refinement.manifold_model import ManifoldModel
 
 
 class IManifoldFitter(ABC):
@@ -19,13 +19,13 @@ class IManifoldFitter(ABC):
     Abstract base class for all manifold fitters.
     Contains core geometric helper methods shared across implementations.
     """
-    def __init__(self, refiner_parameters: RefinerParameters, x_count: int, f_count: int):
-        self.refiner_parameters = refiner_parameters
+    def __init__(self, refinement_parameters: RefinementParameters, x_count: int, f_count: int):
+        self.refinement_parameters = refinement_parameters
         self.x_count = x_count
         self.f_count = f_count
 
     @abstractmethod
-    def fit(self, bubble: LocalBubble, archive: InternalArchive) -> Optional[ManifoldModel]:
+    def fit(self, region: LocalRegion, archive: InternalArchive) -> Optional[ManifoldModel]:
         pass
 
     # ==========================================
@@ -42,9 +42,9 @@ class IManifoldFitter(ABC):
         centered = X - mu
         _, _, Vh = svd(centered, full_matrices=True)
         
-        V_tangent = Vh[:n_tangent]
-        V_normal = Vh[n_tangent:]
-        return mu, Vh, V_tangent, V_normal
+        tangent_basis = Vh[:n_tangent]
+        normal_basis = Vh[n_tangent:]
+        return mu, Vh, tangent_basis, normal_basis
 
     def _compute_base_svd_medoid(self, X: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
@@ -61,9 +61,9 @@ class IManifoldFitter(ABC):
         centered = X - medoid
         _, _, Vh = svd(centered, full_matrices=True)
         
-        V_tangent = Vh[:n_tangent]
-        V_normal = Vh[n_tangent:]
-        return medoid, Vh, V_tangent, V_normal
+        tangent_basis = Vh[:n_tangent]
+        normal_basis = Vh[n_tangent:]
+        return medoid, Vh, tangent_basis, normal_basis
 
     def _compute_spatial_bounds(self, X: np.ndarray, center: np.ndarray, tangents: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         if len(tangents) == 0:
@@ -86,72 +86,72 @@ class IManifoldFitter(ABC):
         normal_coords = (X - center) @ normals.T
         normal_spreads = np.std(normal_coords, axis=0)
         # Apply noise factor and a safety floor
-        return np.maximum(normal_spreads * self.refiner_parameters.noise_factor, 1e-12)
+        return np.maximum(normal_spreads * self.refinement_parameters.orthogonal_noise_factor, 1e-12)
 
 
 
 class StandardSvdFitter(IManifoldFitter):
-    def fit(self, bubble: LocalBubble, archive: InternalArchive) -> Optional[ManifoldModel]:
-        X_E = bubble.get_X_E(archive)
-        if len(X_E) < 2:
+    def fit(self, region: LocalRegion, archive: InternalArchive) -> Optional[ManifoldModel]:
+        empirical_set_X_normalized = region.get_empirical_set_X_normalized(archive)
+        if len(empirical_set_X_normalized) < 2:
             return None
-        return self._compute_model(X_E)
+        return self._compute_model(empirical_set_X_normalized)
 
-    def _compute_model(self, X_E: np.ndarray) -> ManifoldModel:
-        center, basis, tangents, normals = self._compute_base_svd(X_E)
-        bounds_min, bounds_max = self._compute_percentile_bounds(X_E, center, tangents)
-        normal_scales = self._compute_noise_scale_vector(X_E, center, normals)
+    def _compute_model(self, empirical_set_X_normalized: np.ndarray) -> ManifoldModel:
+        center, basis, tangents, normals = self._compute_base_svd(empirical_set_X_normalized)
+        bounds_min, bounds_max = self._compute_percentile_bounds(empirical_set_X_normalized, center, tangents)
+        normal_scales = self._compute_noise_scale_vector(empirical_set_X_normalized, center, normals)
         
         return ManifoldModel(origin=center, basis=basis, tangent_bounds_min=bounds_min, tangent_bounds_max=bounds_max, normal_scales=normal_scales)
 
 
 class TrimmedSvdFitter(StandardSvdFitter):
-    def fit(self, bubble: LocalBubble, archive: InternalArchive) -> Optional[ManifoldModel]:
-        X_E = bubble.get_X_E(archive)
-        if len(X_E) < 3:
-            return super().fit(bubble, archive)
-        center_init, _, _, normals_init = self._compute_base_svd(X_E)
+    def fit(self, region: LocalRegion, archive: InternalArchive) -> Optional[ManifoldModel]:
+        empirical_set_X_normalized = region.get_empirical_set_X_normalized(archive)
+        if len(empirical_set_X_normalized) < 3:
+            return super().fit(region, archive)
+        center_init, _, _, normals_init = self._compute_base_svd(empirical_set_X_normalized)
         if len(normals_init) > 0:
-            normal_projections = (X_E - center_init) @ normals_init.T
+            normal_projections = (empirical_set_X_normalized - center_init) @ normals_init.T
             ortho_dists_sq = np.sum(normal_projections ** 2, axis=1)
         else:
-            ortho_dists_sq = np.zeros(len(X_E))
+            ortho_dists_sq = np.zeros(len(empirical_set_X_normalized))
         trim_fraction = 0.20
-        n_keep = max(2, int(len(X_E) * (1.0 - trim_fraction)))
+        n_keep = max(2, int(len(empirical_set_X_normalized) * (1.0 - trim_fraction)))
         keep_indices = np.argpartition(ortho_dists_sq, n_keep - 1)[:n_keep]
-        return self._compute_model(X_E[keep_indices])
+        return self._compute_model(empirical_set_X_normalized[keep_indices])
 
 class RansacSvdFitter(StandardSvdFitter):
     """
     Random Sample Consensus SVD: Identifies largest inlier consensus set aligned to a line/plane.
     """
-    def __init__(self, refiner_parameters: RefinerParameters, x_count: int, f_count: int):
-        super().__init__(refiner_parameters, x_count, f_count)
+    def __init__(self, refinement_parameters: RefinementParameters, x_count: int, f_count: int):
+        super().__init__(refinement_parameters, x_count, f_count)
         self.n_iterations = 50
         self.threshold_fraction = 0.05
 
-    def fit(self, bubble: LocalBubble, archive: InternalArchive) -> Optional[ManifoldModel]:
-        X_E = bubble.get_X_E(archive)
-        n_points = len(X_E)
+    def fit(self, region: LocalRegion, archive: InternalArchive) -> Optional[ManifoldModel]:
+        empirical_set_X_normalized = region.get_empirical_set_X_normalized(archive)
+        n_points = len(empirical_set_X_normalized)
         n_tangent = min(self.f_count - 1, self.x_count)
         min_samples = n_tangent + 1
 
         if n_points <= min_samples:
-            return super().fit(bubble, archive)
+            return super().fit(region, archive)
 
-        threshold_sq = (self.threshold_fraction * bubble.radius) ** 2
+        threshold_sq = (self.threshold_fraction * region.radius) ** 2
         best_inlier_count = 0
         best_inlier_mask = None
 
         for _ in range(self.n_iterations):
             sample_indices = np.random.choice(n_points, size=min_samples, replace=False)
-            X_sample = X_E[sample_indices]
+            X_sample = empirical_set_X_normalized[sample_indices]
 
-            mu_sample, _, V_tangent, _ = self._compute_base_svd(X_sample)
+            mu_sample, _, tangent_basis, _ = self._compute_base_svd(X_sample)
 
-            centered_all = X_E - mu_sample
-            if len(V_tangent) > 0:
-                projection = (centered_all @ V_tangent.T) @ V_tangent
+            centered_all = empirical_set_X_normalized - mu_sample
+            if len(tangent_basis) > 0:
+                projection = (centered_all @ tangent_basis.T) @ tangent_basis
                 orthogonal_vectors = centered_all - projection
             else:
                 orthogonal_vectors = centered_all
@@ -167,10 +167,10 @@ class RansacSvdFitter(StandardSvdFitter):
                     break
 
         if best_inlier_count < min_samples or best_inlier_mask is None:
-            return super().fit(bubble, archive)
+            return super().fit(region, archive)
 
         # Fit final model purely on the inliers
-        X_inliers = X_E[best_inlier_mask]
+        X_inliers = empirical_set_X_normalized[best_inlier_mask]
         center, basis, tangents, normals = self._compute_base_svd(X_inliers)
         bounds_min, bounds_max = self._compute_percentile_bounds(X_inliers, center, tangents)
         normal_scales = self._compute_noise_scale_vector(X_inliers, center, normals)

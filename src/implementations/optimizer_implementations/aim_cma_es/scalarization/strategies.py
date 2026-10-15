@@ -57,14 +57,16 @@ class FeasibilityScalarizer(Scalarizer):
         return f"Feasibility search. Current g_divisor: {string_array}"
 
 
-class CornerScalarizer(Scalarizer):
-    def __init__(self, state: StateTracker, cv_type: CVType, g_divisor: np.ndarray, axis: int):
-        super().__init__(state, cv_type, g_divisor, ScalarizationMode.CORNER)
-        self.axis = axis
+class CornerSearchScalarizer(Scalarizer):
+    """Corner Search: minimize one normalized objective."""
+
+    def __init__(self, state: StateTracker, cv_type: CVType, g_divisor: np.ndarray, objective_index: int):
+        super().__init__(state, cv_type, g_divisor, ScalarizationMode.CORNER_SEARCH)
+        self.objective_index = objective_index
 
     def evaluate(self, f_raw: np.ndarray, g_raw: np.ndarray) -> np.ndarray:
         f_norm = self.normalize(f_raw)
-        scores = f_norm[:, self.axis]     # view into f_norm (shape (N,))
+        scores = f_norm[:, self.objective_index]     # view into f_norm (shape (N,))
 
         N = scores.shape[0]
         if g_raw.shape[1] > 0:
@@ -90,7 +92,7 @@ class CornerScalarizer(Scalarizer):
 
     def evaluate_archive(self, f_raw: np.ndarray, g_raw: np.ndarray) -> np.ndarray:
         f_norm = self.normalize(f_raw)
-        scores = f_norm[:, self.axis]
+        scores = f_norm[:, self.objective_index]
         return scores
     
     def evaluate_archive_full(self, f_raw: np.ndarray, g_raw: np.ndarray) -> np.ndarray:
@@ -98,16 +100,18 @@ class CornerScalarizer(Scalarizer):
         
 
     def get_string_description(self):
-        return f"Corner [{self.axis}] search."
+        return f"Corner Search, objective [{self.objective_index}]."
 
 
-class GapScalarizer(Scalarizer):
-    def __init__(self, state: StateTracker, cv_type: CVType, g_divisor: np.ndarray, target_raw: np.ndarray, hv_reference_factor: float = 1.2):
-        super().__init__(state, cv_type, g_divisor, ScalarizationMode.GAP)
+class ExploitationScalarizer(Scalarizer):
+    """Exploitation: target a front gap using the article's gap/HVI scalarization."""
+
+    def __init__(self, state: StateTracker, cv_type: CVType, g_divisor: np.ndarray, target_F_raw: np.ndarray, hv_reference_factor: float = 1.2):
+        super().__init__(state, cv_type, g_divisor, ScalarizationMode.EXPLOITATION)
         
         # Keep raw value for possible tabu
-        self.target_raw = target_raw        
-        self.indicator = Candidate_GapHV_Optimized(self.normalize(state.frozen_front_F), np.ones(self.f_count) * hv_reference_factor, self.normalize(target_raw))
+        self.target_F_raw = target_F_raw        
+        self.indicator = Candidate_GapHV_Optimized(self.normalize(state.frozen_front_F), np.ones(self.f_count) * hv_reference_factor, self.normalize(target_F_raw))
 
     def evaluate(self, f_raw: np.ndarray, g_raw: np.ndarray) -> np.ndarray:
         f_norm = self.normalize(f_raw)
@@ -137,22 +141,22 @@ class GapScalarizer(Scalarizer):
         return self.evaluate(f_raw, g_raw)
 
     def get_string_description(self):
-        string_array = np.array2string(self.target_raw, formatter={'float_kind': lambda x: f"{x:.2e}"})
-        return f"Gap {string_array} fill."
+        string_array = np.array2string(self.target_F_raw, formatter={'float_kind': lambda x: f"{x:.2e}"})
+        return f"Exploitation; gap target: {string_array}."
 
 
-class WSumScalarizer(Scalarizer):
+class GlobalExplorationWeightedSumScalarizer(Scalarizer):
     """
     Weighted Sum Scalarizer for global exploration.
     Normalizes objectives and applies a linear weight vector.
     Subtracts the best weighted sum value on the frozen front, so that the current best point has score 0 and improvements are negative.
     """
-    def __init__(self, state: StateTracker, cv_type: CVType, g_divisor: np.ndarray, weights: np.ndarray, current_front: np.ndarray):
-        super().__init__(state, cv_type, g_divisor, ScalarizationMode.EXP)
+    def __init__(self, state: StateTracker, cv_type: CVType, g_divisor: np.ndarray, weights: np.ndarray, frozen_front_F_raw: np.ndarray):
+        super().__init__(state, cv_type, g_divisor, ScalarizationMode.GLOBAL_EXPLORATION)
         self.weights = np.asarray(weights, dtype=float)
-        self.best_value = float(np.min(self.weight_sum_raw(current_front)))
+        self.front_score_offset = float(np.min(self.unshifted_weighted_sum(frozen_front_F_raw)))
 
-    def weight_sum_raw(self, f_raw: np.ndarray) -> np.ndarray:
+    def unshifted_weighted_sum(self, f_raw: np.ndarray) -> np.ndarray:
         """
         Computes the weighted scalarization on raw objectives.
         Normalizes f, then applies weights.
@@ -161,16 +165,16 @@ class WSumScalarizer(Scalarizer):
         f_norm = self.normalize(f_raw)
         return f_norm @ self.weights
 
-    def weight_sum(self, f_raw: np.ndarray) -> np.ndarray:
+    def shifted_weighted_sum(self, f_raw: np.ndarray) -> np.ndarray:
         """
         Computes the weighted scalarization, shifted so that the best point on the frozen front has score 0.
         Improvements over the current front are negative.
-        Returns: w^T * f_norm - best_value, shape (N,)
+        Returns: w^T * f_norm - front_score_offset, shape (N,)
         """
-        return self.weight_sum_raw(f_raw) - self.best_value
+        return self.unshifted_weighted_sum(f_raw) - self.front_score_offset
 
     def evaluate(self, f_raw: np.ndarray, g_raw: np.ndarray) -> np.ndarray:
-        scores = self.weight_sum(f_raw)
+        scores = self.shifted_weighted_sum(f_raw)
 
         N = scores.shape[0]
         if g_raw.shape[1] > 0:
@@ -189,34 +193,34 @@ class WSumScalarizer(Scalarizer):
         return scores
 
     def evaluate_archive(self, f_raw: np.ndarray, g_raw: np.ndarray) -> np.ndarray:
-        return self.weight_sum(f_raw)
+        return self.shifted_weighted_sum(f_raw)
     
     def evaluate_archive_full(self, f_raw: np.ndarray, g_raw: np.ndarray) -> np.ndarray:
         return self.evaluate(f_raw, g_raw)
 
     def get_string_description(self):
         w_str = np.array2string(self.weights, formatter={'float_kind': lambda x: f"{x:.3f}"})
-        return f"Weighted Sum Scalarization with weights: w = {w_str}. Best front value: {self.best_value:.4e}"
+        return f"Global Exploration (weighted sum), weights: w = {w_str}. Front score offset: {self.front_score_offset:.4e}"
 
 
-class CSumScalarizer(Scalarizer):
+class GlobalExplorationChebyshevScalarizer(Scalarizer):
     """
     Augmented Chebyshev Scalarizer for global exploration.
     Normalizes objectives and applies a Chebyshev weight vector.
     Subtracts the best value on the frozen front, so that the current best point has score 0 and improvements are negative.
-    Uses an augmented term (rho) to guarantee strict Pareto compliance even in flat regions.
+    Uses an augmented term (augmentation_coefficient) to guarantee strict Pareto compliance even in flat regions.
     """
-    def __init__(self, state: StateTracker, cv_type: CVType, g_divisor: np.ndarray, weights: np.ndarray, current_front: np.ndarray, rho: float = 0.01):
-        super().__init__(state, cv_type, g_divisor, ScalarizationMode.EXP)
+    def __init__(self, state: StateTracker, cv_type: CVType, g_divisor: np.ndarray, weights: np.ndarray, frozen_front_F_raw: np.ndarray, augmentation_coefficient: float = 0.01):
+        super().__init__(state, cv_type, g_divisor, ScalarizationMode.GLOBAL_EXPLORATION)
         self.weights = np.asarray(weights, dtype=float)
-        self.rho = rho  # Save rho before calling weight_sum_raw
-        self.best_value = float(np.min(self.cheb_weight_sum_raw(current_front)))
+        self.augmentation_coefficient = augmentation_coefficient  # Set before evaluating the unshifted score.
+        self.front_score_offset = float(np.min(self.unshifted_augmented_chebyshev(frozen_front_F_raw)))
 
-    def cheb_weight_sum_raw(self, f_raw: np.ndarray) -> np.ndarray:
+    def unshifted_augmented_chebyshev(self, f_raw: np.ndarray) -> np.ndarray:
         """
         Computes the Augmented Chebyshev scalarization on raw objectives.
         Normalizes f, then applies weights.
-        Returns: max(w * f_norm) + rho * sum(w * f_norm), shape (N,)
+        Returns: max(w * f_norm) + augmentation_coefficient * sum(w * f_norm), shape (N,)
         """
         f_norm = self.normalize(f_raw)
         
@@ -230,18 +234,18 @@ class CSumScalarizer(Scalarizer):
         # The augmented linear term to ensure strict Pareto compliance
         sum_term = np.sum(weighted_f, axis=1)
         
-        return max_term + self.rho * sum_term
+        return max_term + self.augmentation_coefficient * sum_term
 
-    def cheb_weight_sum(self, f_raw: np.ndarray) -> np.ndarray:
+    def shifted_augmented_chebyshev(self, f_raw: np.ndarray) -> np.ndarray:
         """
         Computes the Chebyshev scalarization, shifted so that the best point on the frozen front has score 0.
         Improvements over the current front are negative.
-        Returns: raw_score - best_value, shape (N,)
+        Returns: raw_score - front_score_offset, shape (N,)
         """
-        return self.cheb_weight_sum_raw(f_raw) - self.best_value
+        return self.unshifted_augmented_chebyshev(f_raw) - self.front_score_offset
 
     def evaluate(self, f_raw: np.ndarray, g_raw: np.ndarray) -> np.ndarray:
-        scores = self.cheb_weight_sum(f_raw)
+        scores = self.shifted_augmented_chebyshev(f_raw)
 
         N = scores.shape[0]
         if g_raw.shape[1] > 0:
@@ -260,19 +264,21 @@ class CSumScalarizer(Scalarizer):
         return scores
 
     def evaluate_archive(self, f_raw: np.ndarray, g_raw: np.ndarray) -> np.ndarray:
-        return self.cheb_weight_sum(f_raw)
+        return self.shifted_augmented_chebyshev(f_raw)
     
     def evaluate_archive_full(self, f_raw: np.ndarray, g_raw: np.ndarray) -> np.ndarray:
         return self.evaluate(f_raw, g_raw)
 
     def get_string_description(self):
         string_array = np.array2string(self.weights, formatter={'float_kind': lambda x: f"{x:.2e}"})
-        return f"Chebyshew scalarization: [{string_array}] weight."
+        return f"Global Exploration (augmented Chebyshev), weights: {string_array}."
         
 
-class UHVIScalarizer(Scalarizer):
+class LocalExplorationScalarizer(Scalarizer):
+    """Local Exploration using uncrowded hypervolume improvement (UHVI)."""
+
     def __init__(self, state: StateTracker, cv_type: CVType, g_divisor: np.ndarray, hv_reference_factor: float = 1.2):
-        super().__init__(state, cv_type, g_divisor, ScalarizationMode.UHVI)
+        super().__init__(state, cv_type, g_divisor, ScalarizationMode.LOCAL_EXPLORATION)
         
         self.indicator = Candidate_UHVI_Optimized(self.normalize(state.frozen_front_F), np.ones(self.f_count) * hv_reference_factor)
 
@@ -304,7 +310,7 @@ class UHVIScalarizer(Scalarizer):
         return self.evaluate(f_raw, g_raw)
 
     def get_string_description(self):
-        return f"UHVI initialized. Current empirical HV: {self.indicator.frozen_score}"
+        return f"Local Exploration (UHVI). Current empirical HV: {self.indicator.frozen_score}"
 
 
     

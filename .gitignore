@@ -3,6 +3,10 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Numba compilation caches
+*.nbc
+*.nbi
+
 # C extensions
 *.so
 

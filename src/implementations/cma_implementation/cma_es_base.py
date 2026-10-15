@@ -180,16 +180,16 @@ class CMAES_Base(ABC):
         return False
 
 
-    def warm_start_path(self, v_norm: np.ndarray, path_trust: float) -> None:
+    def warm_start_path(self, unit_improvement_direction: np.ndarray, path_trust: float) -> None:
         """
-        Injects kinematic momentum into the evolution paths.
+        Initializes the evolution paths from the inferred improvement direction.
         path_trust in [0, 1] scales the confidence. 1.0 = perfect neutrality (no sigma decay).
         """
-        if path_trust <= 0.0 or np.linalg.norm(v_norm) < 1e-12:
+        if path_trust <= 0.0 or np.linalg.norm(unit_improvement_direction) < 1e-12:
             return
             
-        # 1. Project physical velocity into isotropic space
-        z = self.C_inv_half @ v_norm
+        # 1. Project the inferred improvement direction into isotropic space
+        z = self.C_inv_half @ unit_improvement_direction
         z_norm = np.linalg.norm(z)
         
         if z_norm < 1e-12:
@@ -199,6 +199,6 @@ class CMAES_Base(ABC):
         chi_N = self.params.chi_n
         K = self.params.K
         
-        # 3. Inject momentum
+        # 3. Initialize evolution paths
         self.ps = path_trust * chi_N * (z / z_norm)
-        self.pc = path_trust * (chi_N / (K * z_norm)) * v_norm
+        self.pc = path_trust * (chi_N / (K * z_norm)) * unit_improvement_direction

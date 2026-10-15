@@ -6,7 +6,7 @@ from src.implementations.optimizer_implementations.aim_cma_es.scalarization.scal
 from src.implementations.optimizer_implementations.aim_cma_es.enums import ScalarizationMode, CMA_Type
 from src.implementations.optimizer_implementations.aim_cma_es.cma_component.cma_kernel import Kernel, KernelOriginalPure, KernelOriginalElite, KernelNormal, KernelElite, KernelLeapfrog, KernelSym
 from src.implementations.optimizer_implementations.aim_cma_es.cma_component.cma_warm_starter import CmaWarmStartManager
-from src.implementations.optimizer_implementations.aim_cma_es.component_parameters import CMAParameters
+from src.implementations.optimizer_implementations.aim_cma_es.component_parameters import CMAComponentParameters
 
 class CmaManager:
     """
@@ -17,7 +17,7 @@ class CmaManager:
                  x_count: int, 
                  true_lower_bounds_normalized: np.ndarray,
                  true_upper_bounds_normalized: np.ndarray,
-                 cma_parameters: CMAParameters
+                 cma_parameters: CMAComponentParameters
                 ) -> None:
         
         self.x_count = x_count
@@ -28,11 +28,11 @@ class CmaManager:
         self.cma_ub = true_upper_bounds_normalized
         
         # CMA Parameters
-        self.popsize: int = cma_parameters.popsize if cma_parameters.popsize else 4 + int(round(3 * np.log(x_count)))
-        self.max_iter: int = np.ceil(cma_parameters.max_iter_const + np.sqrt(x_count) * cma_parameters.max_iter_per_sqrt_dim)
-        self.f_tolerance: float = cma_parameters.convergence_tolerance
+        self.population_size: int = cma_parameters.population_size if cma_parameters.population_size else 4 + int(round(3 * np.log(x_count)))
+        self.max_iter: int = np.ceil(cma_parameters.max_generations_base + np.sqrt(x_count) * cma_parameters.max_generations_per_sqrt_dimension)
+        self.f_tolerance: float = cma_parameters.scalarized_improvement_tolerance
         self.cma_type = cma_parameters.cma_type
-        self.exploration_sigma = cma_parameters.warm_start_parameters.exploration_sigma
+        self.global_exploration_sigma = cma_parameters.warm_start_parameters.global_exploration_sigma
         
         # O(1) Kernel Mapping
         self.kernel_map = {
@@ -82,17 +82,17 @@ class CmaManager:
     def InitKernel(self, archive: InternalArchive, f_U: np.ndarray, scalarizer: Scalarizer, points_of_interest: List[np.ndarray]):
         self.active_scalarizer = scalarizer
         kernel_class = self.kernel_map[self.cma_type]
-        used_popsize = self.popsize
+        used_popsize = self.population_size
         
-        x_0, sigma, C, v_norm, path_trust = self.warm_starter.GetWarmStartValues(archive, f_U, scalarizer, points_of_interest)
+        x_0, sigma, C, unit_improvement_direction, path_trust = self.warm_starter.GetWarmStartValues(archive, f_U, scalarizer, points_of_interest)
         if self.active_scalarizer.mode == ScalarizationMode.FEASIBILITY:
             self.feasibility_runs += 1
-            used_popsize = int(round(self.popsize * (1 + 0.5 * self.feasibility_runs)))  
-        elif (self.active_scalarizer.mode == ScalarizationMode.EXP):
+            used_popsize = int(round(self.population_size * (1 + 0.5 * self.feasibility_runs)))  
+        elif (self.active_scalarizer.mode == ScalarizationMode.GLOBAL_EXPLORATION):
             used_popsize = 6 + 2 * self.x_count
-            sigma = self.exploration_sigma
+            sigma = self.global_exploration_sigma
 
-        self.es_kernel = kernel_class(x0 = x_0, sigma = sigma, C = C, popsize = used_popsize, max_iter = self.max_iter, tolfun = self.f_tolerance, lower_bounds = self.cma_lb, upper_bounds = self.cma_ub, v_norm = v_norm, path_trust =  path_trust)
+        self.es_kernel = kernel_class(x0 = x_0, sigma = sigma, C = C, population_size = used_popsize, max_iter = self.max_iter, tolfun = self.f_tolerance, lower_bounds = self.cma_lb, upper_bounds = self.cma_ub, unit_improvement_direction = unit_improvement_direction, path_trust =  path_trust)
         
     def ask(self) -> np.ndarray:
         """

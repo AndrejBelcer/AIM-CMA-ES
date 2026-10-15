@@ -15,7 +15,7 @@ from src.implementations.cma_implementation.cma_es_variants.cma_es_sym import CM
 
     
 class Kernel(ABC):
-    def __init__(self, x0: np.ndarray, sigma: float, C: np.ndarray, popsize: int, max_iter: int, tolfun: float, lower_bounds: np.ndarray, upper_bounds: np.ndarray, v_norm: np.ndarray, path_trust: float):
+    def __init__(self, x0: np.ndarray, sigma: float, C: np.ndarray, population_size: int, max_iter: int, tolfun: float, lower_bounds: np.ndarray, upper_bounds: np.ndarray, unit_improvement_direction: np.ndarray, path_trust: float):
         pass
         
     @abstractmethod
@@ -143,9 +143,9 @@ class KernelPyCMA(Kernel):
 
 
 class KernelOriginalPure(KernelPyCMA):
-    def __init__(self, x0: np.ndarray, sigma: float, C: np.ndarray, popsize: int, max_iter: int, tolfun: float, lower_bounds: np.ndarray, upper_bounds: np.ndarray, v_norm: np.ndarray, path_trust: float):
+    def __init__(self, x0: np.ndarray, sigma: float, C: np.ndarray, population_size: int, max_iter: int, tolfun: float, lower_bounds: np.ndarray, upper_bounds: np.ndarray, unit_improvement_direction: np.ndarray, path_trust: float):
         inopts: Dict = {
-            'popsize': popsize,
+            'popsize': population_size,
             'maxiter': max_iter,
             'bounds': [lower_bounds.tolist(), upper_bounds.tolist()],
             'BoundaryHandler': cma.BoundTransform,
@@ -160,9 +160,9 @@ class KernelOriginalPure(KernelPyCMA):
         
 
 class KernelOriginalElite(KernelPyCMA):
-    def __init__(self, x0: np.ndarray, sigma: float, C: np.ndarray, popsize: int, max_iter: int, tolfun: float, lower_bounds: np.ndarray, upper_bounds: np.ndarray, v_norm: np.ndarray, path_trust: float):
+    def __init__(self, x0: np.ndarray, sigma: float, C: np.ndarray, population_size: int, max_iter: int, tolfun: float, lower_bounds: np.ndarray, upper_bounds: np.ndarray, unit_improvement_direction: np.ndarray, path_trust: float):
         inopts: Dict = {
-            'popsize': popsize,
+            'popsize': population_size,
             'maxiter': max_iter,
             'bounds': [lower_bounds.tolist(), upper_bounds.tolist()],
             'BoundaryHandler': cma.BoundTransform,
@@ -177,9 +177,9 @@ class KernelOriginalElite(KernelPyCMA):
         
         
 class KernelMyCMA(Kernel):
-    def __init__(self, cma_es: CMAES_Base, v_norm: np.ndarray, path_trust: float):
+    def __init__(self, cma_es: CMAES_Base, unit_improvement_direction: np.ndarray, path_trust: float):
         self.es: CMAES_Base = cma_es
-        self.es.warm_start_path(v_norm, path_trust)
+        self.es.warm_start_path(unit_improvement_direction, path_trust)
 
     def ask(self) -> np.ndarray:
         candidates = self.es.ask()
@@ -208,17 +208,17 @@ class KernelMyCMA(Kernel):
         
 
 class KernelNormal(KernelMyCMA):
-    def __init__(self, x0: np.ndarray, sigma: float, C: np.ndarray, popsize: int, max_iter: int, tolfun: float, lower_bounds: np.ndarray, upper_bounds: np.ndarray, v_norm: np.ndarray, path_trust: float):
-        super().__init__(cma_es = CMAES_Kernel(len(x0), popsize, x0, sigma, C, max_iter, tolfun, lower_bounds, upper_bounds), v_norm = v_norm, path_trust = path_trust)
+    def __init__(self, x0: np.ndarray, sigma: float, C: np.ndarray, population_size: int, max_iter: int, tolfun: float, lower_bounds: np.ndarray, upper_bounds: np.ndarray, unit_improvement_direction: np.ndarray, path_trust: float):
+        super().__init__(cma_es = CMAES_Kernel(len(x0), population_size, x0, sigma, C, max_iter, tolfun, lower_bounds, upper_bounds), unit_improvement_direction = unit_improvement_direction, path_trust = path_trust)
 
 class KernelElite(KernelMyCMA):
-    def __init__(self, x0: np.ndarray, sigma: float, C: np.ndarray, popsize: int, max_iter: int, tolfun: float, lower_bounds: np.ndarray, upper_bounds: np.ndarray, v_norm: np.ndarray, path_trust: float):
-        super().__init__(cma_es = CMAES_Elite_Kernel(len(x0), popsize, x0, sigma, C, max_iter, tolfun, lower_bounds, upper_bounds), v_norm = v_norm, path_trust = path_trust)
+    def __init__(self, x0: np.ndarray, sigma: float, C: np.ndarray, population_size: int, max_iter: int, tolfun: float, lower_bounds: np.ndarray, upper_bounds: np.ndarray, unit_improvement_direction: np.ndarray, path_trust: float):
+        super().__init__(cma_es = CMAES_Elite_Kernel(len(x0), population_size, x0, sigma, C, max_iter, tolfun, lower_bounds, upper_bounds), unit_improvement_direction = unit_improvement_direction, path_trust = path_trust)
         
 class KernelLeapfrog(KernelMyCMA):
-    def __init__(self, x0: np.ndarray, sigma: float, C: np.ndarray, popsize: int, max_iter: int, tolfun: float, lower_bounds: np.ndarray, upper_bounds: np.ndarray, v_norm: np.ndarray, path_trust: float):
-        super().__init__(cma_es = CMAES_Leapfrog_Kernel(len(x0), popsize, x0, sigma, C, max_iter, tolfun, lower_bounds, upper_bounds), v_norm = v_norm, path_trust = path_trust)
+    def __init__(self, x0: np.ndarray, sigma: float, C: np.ndarray, population_size: int, max_iter: int, tolfun: float, lower_bounds: np.ndarray, upper_bounds: np.ndarray, unit_improvement_direction: np.ndarray, path_trust: float):
+        super().__init__(cma_es = CMAES_Leapfrog_Kernel(len(x0), population_size, x0, sigma, C, max_iter, tolfun, lower_bounds, upper_bounds), unit_improvement_direction = unit_improvement_direction, path_trust = path_trust)
         
 class KernelSym(KernelMyCMA):
-    def __init__(self, x0: np.ndarray, sigma: float, C: np.ndarray, popsize: int, max_iter: int, tolfun: float, lower_bounds: np.ndarray, upper_bounds: np.ndarray, v_norm: np.ndarray, path_trust: float):
-        super().__init__(cma_es = CMAES_Sym_Kernel(len(x0), popsize, x0, sigma, C, max_iter, tolfun, lower_bounds, upper_bounds), v_norm = v_norm, path_trust = path_trust)
+    def __init__(self, x0: np.ndarray, sigma: float, C: np.ndarray, population_size: int, max_iter: int, tolfun: float, lower_bounds: np.ndarray, upper_bounds: np.ndarray, unit_improvement_direction: np.ndarray, path_trust: float):
+        super().__init__(cma_es = CMAES_Sym_Kernel(len(x0), population_size, x0, sigma, C, max_iter, tolfun, lower_bounds, upper_bounds), unit_improvement_direction = unit_improvement_direction, path_trust = path_trust)

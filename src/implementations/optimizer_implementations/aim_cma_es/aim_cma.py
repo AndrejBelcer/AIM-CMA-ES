@@ -5,11 +5,11 @@ from src.core.optimizer import Optimizer
 from src.core.event_log import Event
 from src.implementations.optimizer_implementations.aim_cma_es.state_tracker import StateTracker
 from src.implementations.optimizer_implementations.aim_cma_es.scalarization.scalarizer_base import Scalarizer
-from src.implementations.optimizer_implementations.aim_cma_es.scalarization.strategies import FeasibilityScalarizer, CornerScalarizer, GapScalarizer, UHVIScalarizer, WSumScalarizer, CSumScalarizer
+from src.implementations.optimizer_implementations.aim_cma_es.scalarization.strategies import FeasibilityScalarizer, CornerSearchScalarizer, ExploitationScalarizer, LocalExplorationScalarizer, GlobalExplorationWeightedSumScalarizer, GlobalExplorationChebyshevScalarizer
 
 
-from src.implementations.optimizer_implementations.aim_cma_es.enums import Archive_Type, Initializer_Type, CMA_Type, SolverPhase, ScalarizationMode, InitilizerPhase
-from src.implementations.optimizer_implementations.aim_cma_es.component_parameters import ArchiveParameters, CMAParameters, RefinerParameters, InitializationParameters
+from src.implementations.optimizer_implementations.aim_cma_es.enums import Archive_Type, Initializer_Type, CMA_Type, SolverPhase, ScalarizationMode, InitializerPhase
+from src.implementations.optimizer_implementations.aim_cma_es.component_parameters import ArchiveParameters, CMAComponentParameters, RefinementParameters, InitializationParameters
 
 from src.implementations.optimizer_implementations.aim_cma_es.archive.internal_archive import InternalArchive
 from src.implementations.optimizer_implementations.aim_cma_es.archive.kd_tree_archive import KDTreeArchive
@@ -23,7 +23,7 @@ from src.implementations.optimizer_implementations.aim_cma_es.initializer.initia
 
 from src.implementations.optimizer_implementations.aim_cma_es.cma_component.cma_manager import CmaManager
 
-from src.implementations.optimizer_implementations.aim_cma_es.refiner.refiner import Refiner
+from src.implementations.optimizer_implementations.aim_cma_es.refinement.refinement import Refinement
 
 
 
@@ -32,44 +32,44 @@ class AimCma(Optimizer):
     def __init__(self,
                  solver_name: str = "AIM-CMA-ES",
                  # --- Sampling Tolerance ---
-                 x_tolerance: float = 1e-4,
+                 duplicate_distance_factor: float = 1e-4,
                  # --- Configurations ---
                  archive_parameters: ArchiveParameters = ArchiveParameters(),
                  initialization_parameters: InitializationParameters = InitializationParameters(),
-                 cma_parameters: CMAParameters = CMAParameters(),
-                 refiner_parameters: RefinerParameters = RefinerParameters(),
+                 cma_parameters: CMAComponentParameters = CMAComponentParameters(),
+                 refinement_parameters: RefinementParameters = RefinementParameters(),
                 ) -> None:
         
         super().__init__(solver_name)
         
-        self.x_tolerance = x_tolerance
+        self.duplicate_distance_factor = duplicate_distance_factor
         
         self.archive_parameters = archive_parameters
         self.initialization_parameters = initialization_parameters
         self.cma_parameters = cma_parameters
-        self.refiner_parameters = refiner_parameters
+        self.refinement_parameters = refinement_parameters
         
-        self.refiner_activation_at_count = refiner_parameters.refiner_activation_at_count
-        self.refiner_L_loops = refiner_parameters.refiner_L_loops
+        self.refinement_trigger_low_gain_count = refinement_parameters.refinement_trigger_low_gain_count
+        self.refinement_passes_per_run = refinement_parameters.refinement_passes_per_run
 
         # The phase set during ask, so that tell function can know the current phase
         self.current_phase: SolverPhase = SolverPhase.NONE
         # The phase for setting up next phase in some cases
         self.next_phase: SolverPhase = SolverPhase.INITIALIZATION
 
-        # CMA ES exploration parameters
-        self.cma_exploration_phase_remaining: int = 0 # Flag for if the exploration should be run
-        self.exploration_weights: List[np.ndarray] = []
-        self.current_count_exploration_kernels: int = 0 # How many exploration kernels should be run when refiner finishes
-        # Chance of random (UHVI) start
-        self.uhvi_start_chance: float = 0.0
+        # Global Exploration scheduling state
+        self.global_exploration_runs_remaining: int = 0 # Number of pending Global Exploration runs
+        self.global_exploration_weight_pool: List[np.ndarray] = []
+        self.global_exploration_runs_per_cycle: int = 0 # Global Exploration runs to schedule after Refinement
+        # Probability of selecting Local Exploration instead of Exploitation
+        self.local_exploration_probability: float = 0.0
 
         # Logic Queues & Counters
-        self.corner_queue: List[int] = []
+        self.corner_search_queue: List[int] = []
         self.pending_cma_best: Optional[np.ndarray] = None
         
-        self.refiner_failure_counter = 0
-        self.refiner_runs_counter = 0
+        self.low_gain_exploitation_count = 0
+        self.refinement_pass_count = 0
         
         self._reconstruction_data: Dict = {}
         
@@ -91,7 +91,7 @@ class AimCma(Optimizer):
         true_lower_bounds_normalized: np.ndarray = self._normalize_x(self.true_lower_bounds)
         true_upper_bounds_normalized: np.ndarray = self._normalize_x(self.true_upper_bounds)
         
-        self.corner_queue = list(range(self.f_count))
+        self.corner_search_queue = list(range(self.f_count))
 
         # Prepare lookups
         archive_map = {
@@ -117,15 +117,16 @@ class AimCma(Optimizer):
         self.state = StateTracker(f_count=n_obj, x_count=n_vars)
 
         self.cma_manager = CmaManager(x_count=n_vars, true_lower_bounds_normalized=true_lower_bounds_normalized, true_upper_bounds_normalized=true_upper_bounds_normalized, cma_parameters=self.cma_parameters)
-        self.refiner = Refiner(x_count=n_vars, f_count=n_obj, g_count=n_constr, refiner_parameters=self.refiner_parameters)
+        self.refinement = Refinement(x_count=n_vars, f_count=n_obj, g_count=n_constr, refinement_parameters=self.refinement_parameters)
 
-        self.active_x_tolerance = self.x_tolerance * np.sqrt(n_vars)
+        self.duplicate_distance_tolerance = self.duplicate_distance_factor * np.sqrt(n_vars)
         self.current_phase = SolverPhase.NONE
         self.next_phase: SolverPhase = SolverPhase.INITIALIZATION
-        self.cma_exploration_phase_remaining = 0
-        self.current_count_exploration_kernels: int = self.cma_parameters.starting_exploration_kernels
-        self.exploration_weights = []
-        self.uhvi_start_chance = self.cma_parameters.uhvi_start_chance_initial
+        # Initial Global Exploration remains unscheduled, regardless of the cycle baseline.
+        self.global_exploration_runs_remaining = 0
+        self.global_exploration_runs_per_cycle: int = self.cma_parameters.global_exploration_cycle_base_runs
+        self.global_exploration_weight_pool = []
+        self.local_exploration_probability = self.cma_parameters.initial_local_exploration_probability
         self._is_debug_run = False
 
     # ==========================================================================
@@ -151,7 +152,7 @@ class AimCma(Optimizer):
         candidates = np.clip(candidates, self.true_lower_bounds, self.true_upper_bounds)
 
         # 3. Duplicate Checking
-        is_novel, archive_indices = self.internal_archive.check_duplicates_with_indices(candidates, self.active_x_tolerance)
+        is_novel, archive_indices = self.internal_archive.check_duplicates_with_indices(candidates, self.duplicate_distance_tolerance)
         
         # 4. Store Reconstruction Data
         self._reconstruction_data = {
@@ -196,10 +197,10 @@ class AimCma(Optimizer):
             self.current_phase = SolverPhase.INITIALIZATION
             return self._ask_initializer()
 
-        # Priority 2: Refiner Phase
-        if self.next_phase == SolverPhase.REFINER:
-            self.current_phase = SolverPhase.REFINER
-            return self._ask_refiner()
+        # Priority 2: Refinement Phase
+        if self.next_phase == SolverPhase.REFINEMENT:
+            self.current_phase = SolverPhase.REFINEMENT
+            return self._ask_refinement()
 
         # Priority 3: CMA Phase
         self.current_phase = SolverPhase.CMA
@@ -208,7 +209,7 @@ class AimCma(Optimizer):
     
     def _ask_initializer(self) -> np.ndarray:
         # Check if we are in the optimizer phase but don't have an active optimizer running
-        if self.initializer.phase == InitilizerPhase.OPTIMIZER and not self.initializer.is_optimizer_active:
+        if self.initializer.phase == InitializerPhase.OPTIMIZER and not self.initializer.is_optimizer_active:
             
             if self.initializer.has_remaining_points:
                 g_divisor = self.compute_g_scales_from_archive()
@@ -238,9 +239,9 @@ class AimCma(Optimizer):
             
         return self._denormalize_x(self.cma_manager.ask())
         
-    def _ask_refiner(self) -> np.ndarray:
+    def _ask_refinement(self) -> np.ndarray:
         f_L, _, f_D = self.state.GetNormalizationBounds(self.internal_archive)
-        candidates = self.refiner.get_candidates(archive=self.internal_archive, front_indices=self.state.empirical_front_indices, f_L = f_L, f_D = f_D)
+        candidates = self.refinement.get_candidates(archive=self.internal_archive, front_indices=self.state.empirical_front_indices, f_L = f_L, f_D = f_D)
         return self._denormalize_x(candidates)
 
 
@@ -267,21 +268,22 @@ class AimCma(Optimizer):
             
             # 2. Update StateTracker (Buffered during CMA stage to delay NDS overhead)
             self.state.buffer_live_state(new_indices, f, g, self.internal_archive)
-            if(self.current_phase == SolverPhase.REFINER):
-                self.refiner_runs_counter += 1
-                if self.refiner_runs_counter >= self.refiner_L_loops:
-                    self.refiner_runs_counter = 0
+            # Preserve reported behavior: only batches with new evaluations count.
+            if(self.current_phase == SolverPhase.REFINEMENT):
+                self.refinement_pass_count += 1
+                if self.refinement_pass_count >= self.refinement_passes_per_run:
+                    self.refinement_pass_count = 0
                     self.next_phase = SolverPhase.CMA
-                    self.current_count_exploration_kernels = min(self.current_count_exploration_kernels + self.cma_parameters.step_exploration_kernels, self.cma_parameters.end_exploration_kernels)
-                    self.cma_exploration_phase_remaining = self.current_count_exploration_kernels
-                    self.uhvi_start_chance = self.cma_parameters.uhvi_start_chance_final
+                    self.global_exploration_runs_per_cycle = min(self.global_exploration_runs_per_cycle + self.cma_parameters.global_exploration_runs_increment, self.cma_parameters.max_global_exploration_runs)
+                    self.global_exploration_runs_remaining = self.global_exploration_runs_per_cycle
+                    self.local_exploration_probability = self.cma_parameters.final_local_exploration_probability
                 # Check for corner improvement.
                 if(self._is_debug_run):
-                    self._current_debug_event["Corner Improvement"] = self.state.DebugCornerImprovement(f_significant_change=self.cma_parameters.f_significant_change)
-                list_of_improvements: list[int] = self.state.CheckCornerImprovement(f_significant_change=self.cma_parameters.f_significant_change)
+                    self._current_debug_event["Corner Improvement"] = self.state.DebugCornerImprovement(corner_improvement_tolerance=self.cma_parameters.corner_improvement_tolerance)
+                list_of_improvements: list[int] = self.state.CheckCornerImprovement(corner_improvement_tolerance=self.cma_parameters.corner_improvement_tolerance)
                 for i in list_of_improvements:
-                        if i not in self.corner_queue:
-                            self.corner_queue.append(i)
+                        if i not in self.corner_search_queue:
+                            self.corner_search_queue.append(i)
             
             
             if (not self.cma_manager.is_active()):
@@ -375,8 +377,8 @@ class AimCma(Optimizer):
         if mode == ScalarizationMode.FEASIBILITY:
             return
 
-        # --- GAP / UHVI Logic ---
-        if mode in [ScalarizationMode.GAP, ScalarizationMode.UHVI]:
+        # --- Exploitation / Local Exploration hypervolume gain ---
+        if mode in [ScalarizationMode.EXPLOITATION, ScalarizationMode.LOCAL_EXPLORATION]:
             hv_start = scalarizer.indicator.frozen_score
             live_indices = self.state.empirical_front_indices
             raw_live_front, _ = self.internal_archive.get_values_by_indices(live_indices)
@@ -385,31 +387,31 @@ class AimCma(Optimizer):
 
             gain = hv_end - hv_start
             
-            if mode == ScalarizationMode.GAP:
-                if gain < self.cma_parameters.f_HV_tolerance:                    
-                    self.state.add_tabu_point(scalarizer.target_raw)
+            if mode == ScalarizationMode.EXPLOITATION:
+                if gain < self.cma_parameters.exploitation_hv_gain_tolerance:                    
+                    self.state.add_exploitation_tabu_target(scalarizer.target_F_raw)
                     if(self._is_debug_run):
-                        self._current_debug_event["Tabu Add"] = f"Gap Fill Failed. Adding target to Tabu."
-                        self._current_debug_event["Tabu List"] = self.state.tabu_array.copy()
+                        self._current_debug_event["Tabu Add"] = f"Low-gain Exploitation run. Adding target to tabu."
+                        self._current_debug_event["Tabu List"] = self.state.exploitation_tabu_targets_F_raw.copy()
                     
-                    # Refiner stage counter
-                    self.refiner_failure_counter += 1
-                    if self.refiner_failure_counter >= self.refiner_activation_at_count:
-                        self.refiner_failure_counter = 0
+                    # Accumulate low-gain Exploitation runs; successes do not reset this count.
+                    self.low_gain_exploitation_count += 1
+                    if self.low_gain_exploitation_count >= self.refinement_trigger_low_gain_count:
+                        self.low_gain_exploitation_count = 0
                         # Permanent tolerance reduction
-                        self.active_x_tolerance = max(1e-6, self.active_x_tolerance * 0.5)
-                        self.next_phase = SolverPhase.REFINER
+                        self.duplicate_distance_tolerance = max(1e-6, self.duplicate_distance_tolerance * 0.5)
+                        self.next_phase = SolverPhase.REFINEMENT
                         if(self._is_debug_run):
-                            self._current_debug_event["Refiner Start"] = "Refiner started."
+                            self._current_debug_event["Refinement Start"] = "Refinement started."
 
         # --- CORNER RE-QUEUE LOGIC ---
         if(self._is_debug_run):
-            self._current_debug_event["Corner Improvement"] = self.state.DebugCornerImprovement(f_significant_change=self.cma_parameters.f_significant_change)
-        list_of_improvements: list[int] = self.state.CheckCornerImprovement(f_significant_change=self.cma_parameters.f_significant_change)
+            self._current_debug_event["Corner Improvement"] = self.state.DebugCornerImprovement(corner_improvement_tolerance=self.cma_parameters.corner_improvement_tolerance)
+        list_of_improvements: list[int] = self.state.CheckCornerImprovement(corner_improvement_tolerance=self.cma_parameters.corner_improvement_tolerance)
         for i in list_of_improvements:
-            if not((mode == ScalarizationMode.CORNER and scalarizer.axis == i)):
-                if i not in self.corner_queue:
-                    self.corner_queue.append(i)
+            if not((mode == ScalarizationMode.CORNER_SEARCH and scalarizer.objective_index == i)):
+                if i not in self.corner_search_queue:
+                    self.corner_search_queue.append(i)
 
     def compute_g_scales_from_archive(self, percentile: float = 75.0, min_scale: float = 1e-9, min_pos_count: int = 10) -> np.ndarray:
         # Short-circuit for unconstrained problems
@@ -450,7 +452,7 @@ class AimCma(Optimizer):
         return scales
 
 
-    def GenerateExplorationWeights(self, number_of_weights: int) -> List[np.ndarray]:
+    def GenerateGlobalExplorationWeights(self, number_of_weights: int) -> List[np.ndarray]:
         """
         Generates stratified weights on the (M-1)-simplex.
         
@@ -487,49 +489,49 @@ class AimCma(Optimizer):
         # Compute G-Scales exactly once per kernel initialization
         g_divisor = self.compute_g_scales_from_archive()
         
-        # 0. Exploration Mode 
-        if (self.cma_exploration_phase_remaining > 0):
-            self.cma_exploration_phase_remaining -= 1
-            return self.CreateWSUMScalarizer(g_divisor)
+        # 0. Scheduled Global Exploration 
+        if (self.global_exploration_runs_remaining > 0):
+            self.global_exploration_runs_remaining -= 1
+            return self.CreateGlobalExplorationChebyshevScalarizer(g_divisor)
 
         n_front = len(self.state.frozen_front_X)
         # 1. Feasibility Mode
         if n_front == 0:
             return FeasibilityScalarizer(self.state, self.cma_parameters.cv_type, g_divisor), []
 
-        # 2. Corner Mode
-        if n_front < self.f_count and len(self.corner_queue) == 0:
+        # 2. Corner Search
+        if n_front < self.f_count and len(self.corner_search_queue) == 0:
             if(self._is_debug_run):
                 self._current_debug_event["Small Front"] = "Front too small for gaps. Refilling corner queue."
-            self.corner_queue = list(range(self.f_count))
+            self.corner_search_queue = list(range(self.f_count))
         
-        if self.corner_queue:
-            return self.CreateCornerScalarizer(g_divisor)
+        if self.corner_search_queue:
+            return self.CreateCornerSearchScalarizer(g_divisor)
 
-        # 3. Gap Mode
-        if np.random.rand() > self.uhvi_start_chance:
-            gap_target, gap_points_raw, all_tabu = self.state.GetGapTarget(self.cma_parameters.f_Tabu_tolerance)
+        # 3. Exploitation
+        if np.random.rand() > self.local_exploration_probability:
+            exploitation_target_F_raw, gap_endpoints_X_raw, all_tabu = self.state.GetExploitationGapTarget(self.cma_parameters.exploitation_tabu_distance_tolerance)
             
             if(all_tabu):
                 if(self._is_debug_run):
-                    self._current_debug_event["Tabu Full"] = "All gaps Tabu. Clearing list and running UHVI."
-                self.state.empty_tabu_array()
+                    self._current_debug_event["Tabu Full"] = "All gaps tabu. Clearing list and running Local Exploration (UHVI)."
+                self.state.clear_exploitation_tabu_targets()
             
-            if (gap_target is not None):
-                points_of_interest = [self._normalize_x(p) for p in gap_points_raw]
+            if (exploitation_target_F_raw is not None):
+                points_of_interest = [self._normalize_x(p) for p in gap_endpoints_X_raw]
                 if (self._is_debug_run):
-                    self._current_debug_event["Gap_Target"] = gap_target.copy()
-                return GapScalarizer(self.state, self.cma_parameters.cv_type, g_divisor, gap_target, hv_reference_factor=self.cma_parameters.hv_reference_factor), points_of_interest
+                    self._current_debug_event["Exploitation_Target"] = exploitation_target_F_raw.copy()
+                return ExploitationScalarizer(self.state, self.cma_parameters.cv_type, g_divisor, exploitation_target_F_raw, hv_reference_factor=self.cma_parameters.hv_reference_factor), points_of_interest
 
-        # 4. UHVI Mode            
-        return UHVIScalarizer(self.state, self.cma_parameters.cv_type, g_divisor, hv_reference_factor=self.cma_parameters.hv_reference_factor), []
+        # 4. Local Exploration (UHVI)            
+        return LocalExplorationScalarizer(self.state, self.cma_parameters.cv_type, g_divisor, hv_reference_factor=self.cma_parameters.hv_reference_factor), []
 
 
-    def CreateWSUMScalarizer(self, g_divisor: np.ndarray) -> Tuple[Scalarizer, List[np.ndarray]]:      
+    def CreateGlobalExplorationWeightedSumScalarizer(self, g_divisor: np.ndarray) -> Tuple[Scalarizer, List[np.ndarray]]:      
         # Replenish weight list if empty
-        if len(self.exploration_weights) == 0:
+        if len(self.global_exploration_weight_pool) == 0:
             n_weights = 3 * self.f_count
-            self.exploration_weights = self.GenerateExplorationWeights(n_weights)
+            self.global_exploration_weight_pool = self.GenerateGlobalExplorationWeights(n_weights)
         
         # 1. Pick a random starting point in normalized [0,1]^D ROI space
         c = np.random.rand(self.x_count)
@@ -549,7 +551,7 @@ class AimCma(Optimizer):
         best_weight_idx = -1
         best_median_score = np.inf
         
-        for i, w in enumerate(self.exploration_weights):
+        for i, w in enumerate(self.global_exploration_weight_pool):
             scores = f_norm_neighbors @ w  # shape (k,)
             median_score = np.median(scores)
             if median_score < best_median_score:
@@ -557,23 +559,23 @@ class AimCma(Optimizer):
                 best_weight_idx = i
         
         # 5. Pick the best weight and remove it from the list
-        best_weight = self.exploration_weights.pop(best_weight_idx)
+        best_weight = self.global_exploration_weight_pool.pop(best_weight_idx)
         
         if self._is_debug_run:
-            self._current_debug_event["Exploration"] = (
-                f"WSUM cold start. Weight: {np.array2string(best_weight, formatter={'float_kind': lambda x: f'{x:.3f}'})}, "
+            self._current_debug_event["Global Exploration"] = (
+                f"Global Exploration (weighted sum) start. Weight: {np.array2string(best_weight, formatter={'float_kind': lambda x: f'{x:.3f}'})}, "
                 f"Median score: {best_median_score:.4e}"
             )
         
-        # 6. Return WSumScalarizer with that weight, and [c] as the cold-start center
-        return WSumScalarizer(self.state, self.cma_parameters.cv_type, g_divisor, best_weight, self.state.frozen_front_F), [c]
+        # 6. Return GlobalExplorationWeightedSumScalarizer with that weight, and [c] as the cold-start center
+        return GlobalExplorationWeightedSumScalarizer(self.state, self.cma_parameters.cv_type, g_divisor, best_weight, self.state.frozen_front_F), [c]
 
 
-    def CreateCSUMScalarizer(self, g_divisor: np.ndarray) -> Tuple[Scalarizer, List[np.ndarray]]:      
+    def CreateGlobalExplorationChebyshevScalarizer(self, g_divisor: np.ndarray) -> Tuple[Scalarizer, List[np.ndarray]]:      
         # Replenish weight list if empty
-        if len(self.exploration_weights) == 0:
+        if len(self.global_exploration_weight_pool) == 0:
             n_weights = 3 * self.f_count
-            self.exploration_weights = self.GenerateExplorationWeights(n_weights)
+            self.global_exploration_weight_pool = self.GenerateGlobalExplorationWeights(n_weights)
         
         # 1. Pick a random starting point in normalized [0,1]^D ROI space
         c = np.random.rand(self.x_count)
@@ -592,14 +594,14 @@ class AimCma(Optimizer):
         # 4. For each remaining weight, compute median Augmented Chebyshev score across neighbors
         best_weight_idx = -1
         best_median_score = np.inf
-        rho = 0.01  # Must match the default rho in CSumScalarizer
+        augmentation_coefficient = 0.01  # Must match the default augmentation coefficient in GlobalExplorationChebyshevScalarizer
         
-        for i, w in enumerate(self.exploration_weights):
+        for i, w in enumerate(self.global_exploration_weight_pool):
             # --- FIXED SCORES COMPUTATION ---
             weighted_f = f_norm_neighbors * w               # Element-wise multiplication, shape (k, M)
             max_term = np.max(weighted_f, axis=1)           # Chebyshev max term, shape (k,)
             sum_term = np.sum(weighted_f, axis=1)           # Augmented linear term, shape (k,)
-            scores = max_term + rho * sum_term              # Final score, shape (k,)
+            scores = max_term + augmentation_coefficient * sum_term              # Final score, shape (k,)
             # --------------------------------
             
             median_score = np.median(scores)
@@ -608,35 +610,23 @@ class AimCma(Optimizer):
                 best_weight_idx = i
         
         # 5. Pick the best weight and remove it from the list
-        best_weight = self.exploration_weights.pop(best_weight_idx)
+        best_weight = self.global_exploration_weight_pool.pop(best_weight_idx)
         
         if self._is_debug_run:
-            self._current_debug_event["Exploration"] = (
-                f"CSUM cold start. Weight: {np.array2string(best_weight, formatter={'float_kind': lambda x: f'{x:.3f}'})}, "
+            self._current_debug_event["Global Exploration"] = (
+                f"Global Exploration (augmented Chebyshev) start. Weight: {np.array2string(best_weight, formatter={'float_kind': lambda x: f'{x:.3f}'})}, "
                 f"Median score: {best_median_score:.4e}"
             )
         
-        # 6. Return CSumScalarizer with that weight, and [c] as the cold-start center
-        return CSumScalarizer(self.state, self.cma_parameters.cv_type, g_divisor, best_weight, self.state.frozen_front_F, rho=rho), [c]
+        # 6. Return GlobalExplorationChebyshevScalarizer with that weight, and [c] as the cold-start center
+        return GlobalExplorationChebyshevScalarizer(self.state, self.cma_parameters.cv_type, g_divisor, best_weight, self.state.frozen_front_F, augmentation_coefficient=augmentation_coefficient), [c]
 
 
-    def CreateR2Scalarizer(self, g_divisor: np.ndarray) -> Tuple[Scalarizer, List[np.ndarray]]:
-        # 1. Pick a random starting point in normalized [0,1]^D ROI space
-        c = np.random.rand(self.x_count)
-
-        if self._is_debug_run:
-            self._current_debug_event["Exploration"] = (f"R2 cold start.")
-        
-        # 2. Return R2Scalarizer and [c] as the cold-start center
-        return R2Scalarizer(state=self.state, cv_type=self.cma_parameters.cv_type, g_divisor = g_divisor), [c]
-    
-    def CreateEXPScalarizer(self, g_divisor: np.ndarray) -> Tuple[Scalarizer, List[np.ndarray]]:
-        c = np.random.rand(self.x_count)
-        return ExpUHVIScalarizer(self.state, self.cma_parameters.cv_type, g_divisor, hv_reference_factor=self.cma_parameters.hv_reference_factor), [c]
     
     
-    def CreateCornerScalarizer(self, g_divisor: np.ndarray) -> Tuple[Scalarizer, List[np.ndarray]]:
-        idx = self.corner_queue.pop(0)
+    
+    def CreateCornerSearchScalarizer(self, g_divisor: np.ndarray) -> Tuple[Scalarizer, List[np.ndarray]]:
+        idx = self.corner_search_queue.pop(0)
         front_F = self.state.frozen_front_F
         front_X = self.state.frozen_front_X
         
@@ -644,13 +634,13 @@ class AimCma(Optimizer):
         raw_corner_x = front_X[best_row_idx]
         
         points_of_interest = [self._normalize_x(raw_corner_x)]
-        return CornerScalarizer(self.state, self.cma_parameters.cv_type, g_divisor, idx), points_of_interest
+        return CornerSearchScalarizer(self.state, self.cma_parameters.cv_type, g_divisor, idx), points_of_interest
 
 
     def _normalize_x(self, x: np.ndarray) -> np.ndarray:
         return (x - self.roi_lower_bounds) / self.roi_range
 
     def _denormalize_x(self, x_norm: np.ndarray) -> np.ndarray:
-        dernomalized = self.roi_lower_bounds + x_norm * self.roi_range
-        dernomalized = np.clip(dernomalized, self.true_lower_bounds, self.true_upper_bounds)
-        return dernomalized
+        denormalized = self.roi_lower_bounds + x_norm * self.roi_range
+        denormalized = np.clip(denormalized, self.true_lower_bounds, self.true_upper_bounds)
+        return denormalized
